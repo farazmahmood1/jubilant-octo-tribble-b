@@ -19,6 +19,7 @@ npm run verify           # read-only connection check for Neon, Shopify and Post
 | `npm run build` / `npm start` | Compile to `dist/` and run it (used on Render) |
 | `npm run typecheck` | TypeScript, no emit |
 | `npm run verify` | Checks every configured integration, read-only |
+| `npm test` / `npm run test:watch` | `node:test` over `src/**/*.test.ts`, once or on change |
 
 ## Configuration
 
@@ -51,7 +52,23 @@ src/
   integrations/postex/      read-only PostEx client + verified response types
   integrations/shopify/     Admin GraphQL client, 24-hour token cache
   scripts/verify.ts         read-only connection check
+  test/                     fixture loader, PII masking, fixtures/
 ```
+
+## Tests and fixtures
+
+Tests sit next to the code as `*.test.ts` and run with `node:test` through `tsx`, so there is no
+build step and no test framework dependency.
+
+Fixtures in `src/test/fixtures/` are **recorded real responses**, because PostEx has no sandbox
+and its field names differ from its own documentation. Two rules:
+
+- Pass every recording through `maskPii()` (`src/test/mask-pii.ts`) before saving it. It replaces
+  names, phones, addresses and emails at any depth and keeps what matching needs: order names,
+  tracking numbers, cities, amounts. Read the file before committing it anyway.
+- Name files `<source>-<endpoint>-<case>.json`, e.g. `postex-track-order-delivered.json` or
+  `shopify-orders-cancelled.json`, and load them with `fixture('postex-track-order-delivered')`.
+  The loader rejects names that break the pattern.
 
 ## Rules this code follows
 
