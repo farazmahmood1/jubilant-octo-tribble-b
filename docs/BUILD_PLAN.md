@@ -89,551 +89,644 @@ Store only name, phone, address (the proposal's commitment). Phone is normalised
 
 ### 1.10 Consequences for the steps below
 
-These follow from 1.1–1.9 and shape the phase order, so they are stated once here.
+These follow from 1.1–1.9 and the batch order in section 2.
 
-- **Ledgers exist before the first sync.** The delivered handler (1.6) writes a stock move (1.4)
-  and a journal entry (1.5) from the first PostEx sync in week 1. So `locations`, `stock_moves`,
-  `accounts` and `journal_*` are foundation work (A8), not week 3 work. Phases E and G add flows
-  on top; they do not introduce the ledgers.
 - **One transition handler.** `src/modules/shipments/transitions.ts` is the only code that turns
-  a shipment status change into stock moves and journal entries. Sync, backfill and replay all go
-  through it. Nothing else posts revenue.
+  a shipment status change into effects. It is written with logistics (Batch D) and gains its
+  stock effects when Batch E lands and its journal effects when Batch G lands. Sync, backfill and
+  replay all go through it. Nothing else recognises revenue (1.6).
+- **Ledgers are filled by replay, not retrofitted.** Because `shipment_events` is append-only and
+  keyed, and every stock move and journal entry carries its source (`ref_type/ref_id`,
+  `source_type/source_id`), each ledger can be built from history the day it lands. Stock
+  (Batch E) and journal (Batch G) are populated by replaying every event through the handler,
+  then kept current by the same handler. Nothing is back-edited.
+- **Release 1 figures before the journal exists.** Until Batch G, "delivered revenue" on the
+  dashboard is labelled *Delivered COD* and read from delivered shipments. It switches to the
+  journal when Batch G lands, and the two must agree to the paisa for the same period.
 - **Reservation is not a location.** It is not in the 1.4 list, and a reserved unit has not
   moved. `available = warehouse quant − open reservations`, where open reservations are the lines
-  of orders that are placed/confirmed with no shipment picked up yet. A view, never a move.
-- **Missing inputs do not block the ledger.** Product costs and opening stock arrive later
-  (§3). A delivery before costs exist posts the sale and opens a `cost_missing` review item; COGS
-  is posted, dated at delivery, once the cost lands. Warehouse quants may go negative until
-  opening stock is loaded as dated opening moves; negatives are flagged, never clamped.
-- **Raw payloads are kept.** Every Shopify payload and PostEx response is stored as received
-  (`jsonb`) before it is mapped. PostEx has no sandbox and no history beyond what it returns
-  today, so raw rows are the only replay source.
+  of orders that are not cancelled and have no shipment yet. A view, never a move.
+- **The order `state` is a view** (`order_states`), derived from the latest confirmation, the
+  shipment and the postings. It is never a column anyone can write (1.3).
+- **Missing inputs do not block anything.** A delivery whose variant has no cost effective at the
+  order date opens a `cost_missing` reconciliation item and its COGS posts once the cost exists.
+  Warehouse quants may go negative until opening stock is loaded as dated opening moves;
+  negatives are flagged, never clamped.
+- **Raw payloads are kept.** Webhook payloads in `webhook_events.payload`; the latest Shopify
+  order in `orders.raw`; the latest PostEx parcel in `shipments.raw`, and each history step in
+  `shipment_events.raw`. PostEx has no sandbox, so these are the only replay source.
 - **Corrections are reversals.** Stock moves and journal lines are never updated or deleted
   (enforced by trigger). A correction is a new reversing row with a reason and an actor.
-- **Unknown is a state, not an error.** An unrecognised PostEx status code, an unmatched
-  shipment, a COD mismatch: each opens a review item. Sync never crashes on data it does not
+- **Unknown is a state, not an error.** An unrecognised status code, an unmatched shipment, a COD
+  mismatch: each opens a `reconciliation_items` row. Sync never crashes on data it does not
   understand.
 - **No invented numbers.** A tile with no data shows "—", as the overview does today.
 
+---
+
+## 2. Schema, in build order
+
+Migrations are numbered SQL files run by a small runner (`backend/src/db/migrate.ts`) against a `schema_migrations` table. No ORM. postgres.js with hand-written SQL and typed row interfaces.
+
+### Batch A — foundations (step 1)
+
+```
+schema_migrations
+stores                 id, key(nur|organics), label, shop_domain, currency
+postex_accounts        id, key, label, store_id (nullable default link)
+users                  id, email, name, role, password_hash, is_active
+audit_log              id, actor_id, action, entity, entity_id, before, after, at
+app_settings           key, value jsonb
+sync_runs              id, job, account_ref, started_at, finished_at, status, stats jsonb, error
+integration_cursors    job, account_ref, cursor, updated_at
+```
+
+`stores` and `postex_accounts` are seeded from config on boot so the existing env-driven setup keeps working.
+
+### Batch B — catalogue (step 2)
+
+```
+products               id, store_id, shopify_product_id, title, brand, status
+variants               id, product_id, shopify_variant_id, sku, title, barcode
+                       unique (store_id, shopify_variant_id)
+                       unique (store_id, sku) where sku is not null
+product_costs          id, variant_id, unit_cost_paisa, effective_from, source, note
+```
+
+`product_costs` is **effective-dated**, never overwritten. COGS on a delivered order uses the cost effective at the order date, so profit history stays correct when prices change (proposal 6.1 step 4).
+
+Juggun's Organics has no SKUs yet. Allow `sku IS NULL` and surface an "unmapped variants" screen; do not block ingest on it.
+
+### Batch C — orders and customers (step 3)
+
+```
+customers              id, store_id, shopify_customer_id, name, phone_e164, email
+addresses              id, customer_id, line1, line2, city, province, postal, country
+orders                 id, store_id, shopify_order_id, order_number, placed_at,
+                       customer_id, shipping_address_id, financial_status, fulfillment_status,
+                       currency, subtotal, discount, shipping, tax, total_paisa,
+                       channel(online|consignment|pr), cancelled_at, cancel_reason,
+                       tags text[], discount_codes text[], raw jsonb
+order_lines            id, order_id, variant_id (nullable), sku, title, qty, unit_price, discount, total
+webhook_events         id, store_id, topic, shopify_event_id unique, received_at, processed_at, payload
+```
+
+`raw jsonb` keeps the untouched Shopify payload. It costs little and saves the project when a field turns out to matter later.
+
+### Batch D — logistics (step 4)
+
+```
+shipments              id, postex_account_id, tracking_number (unique per account),
+                       order_ref_number, order_id (nullable FK), match_confidence, match_method,
+                       status_code, status_message, booked_at, delivered_at, status_updated_at,
+                       cod_amount_paisa, city, customer_phone,
+                       attempts_count, last_failure_reason, raw jsonb
+shipment_events        id, shipment_id, code, message, occurred_at, raw
+                       unique (shipment_id, code, occurred_at)
+shipment_charges       id, shipment_id, kind(forward|forward_tax|reversal|reversal_tax),
+                       amount_paisa, booked_at
+cod_payouts            id, postex_account_id, cpr_number, paid_at, amount_paisa, raw
+payout_lines           id, cod_payout_id, shipment_id, amount_paisa
+reconciliation_items   id, kind, severity, shipment_id, order_id, detail jsonb,
+                       status(open|resolved|ignored), resolved_by, resolved_at, note
+```
+
+`shipment_events` is append-only and uniquely keyed, so re-polling a parcel is free.
+
+Verified PostEx field names to map (proven against live data): `invoicePayment`, `transactionFee`, `transactionTax`, `reversalFee`, `reversalTax`, `orderDeliveryDate`, `statusUpdatedAt`, `transactionStatusHistory[].{code,message,updatedAt}`, `cpr1`, `cpr1Date`. List and bulk endpoints wrap rows in `trackingResponse`.
+
+Status codes that drive behaviour: `0005` delivered, `0013` attempt made (reason RFD/CNA/ICA/OPN), `0008` under review, `0040` return initiated, `0006` returned at merchant warehouse, `0002` cancelled by merchant.
+
+### Batch E — inventory (step 5)
+
+```
+locations              id, kind, label, partner_id (nullable), is_active
+stock_moves            id, variant_id, qty, from_location_id, to_location_id,
+                       reason, ref_type, ref_id, actor_id, occurred_at, note
+stock_quants           variant_id, location_id, qty   (materialised, rebuildable)
+stock_adjustments      id, location_id, reason, note, actor_id, at
+retail_partners        id, name, contact, phone, city, terms, location_id
+consignment_transfers  id, partner_id, sent_at, status, note
+partner_sales_imports  id, partner_id, period_start, period_end, file_name,
+                       status, rows_ok, rows_failed, imported_by, at
+```
+
+### Batch F — purchase (step 6)
+
+```
+vendors, purchase_requests, quotations, quotation_lines,
+purchase_orders, po_lines, goods_receipts, gr_lines,
+vendor_bills, bill_lines, vendor_payments
+```
+
+Three-way match before payment: PO to receipt to bill. Goods receipt writes `product_costs` and a `supplier → warehouse` stock move.
+
+### Batch G — accounting (step 7)
+
+```
+accounts               id, code, name, type(asset|liability|equity|income|expense), parent_id
+journal_entries        id, entry_date, memo, source_type, source_id, posted_at, posted_by, reversed_by
+journal_lines          id, entry_id, account_id, debit_paisa, credit_paisa,
+                       partner_type, partner_id, store_id
+                       constraint: per entry, SUM(debit) = SUM(credit)
+tax_rates              id, name, percent, account_id
+fiscal_periods         id, year, month, status(open|closed), closed_at, closed_by
+invoices / invoice_lines / payments
+bank_statements / bank_lines
+```
+
+Month closes on the 5th (proposal 6.5 step 6). Once closed, corrections post as dated adjustments in the next open period. Never silent edits — the audit log and the reversal chain are the feature.
+
+### Batch H — confirmation and PR (step 8)
+
+```
+confirmations          id, order_id, state(pending|confirmed|no_answer|changed|cancelled|unreachable),
+                       agent_id, attempts, next_attempt_at, outcome_reason, confirmed_at
+confirmation_attempts  id, confirmation_id, agent_id, channel(whatsapp|call), at, outcome, note
+influencers            id, handle, name, city, followers, niche, notes
+influencer_codes       id, influencer_id, store_id, discount_code
+pr_sends               id, influencer_id, created_by, status, shipment_id, order_id, cost_paisa, at
+pr_send_lines          id, pr_send_id, variant_id, qty, unit_cost_paisa
+influencer_posts       id, influencer_id, pr_send_id, url, kind(reel|story|post), posted_at, note
+```
+
+### 2.1 Review notes on the schema
+
+Checked against section 1 before any SQL is written. Each item is either applied in the steps
+below (**applied**) or needs a decision (**decide**).
+
+| # | Where | Issue | Resolution |
+| --- | --- | --- | --- |
+| 1 | Batch H | Order Confirmation Desk goes live at the end of week 2 (proposal §13), but `confirmations` is step 8. | **Applied:** Batch H is split. `confirmations` and `confirmation_attempts` land right after Batch D (step CNF-1); the PR tables land in week 3. |
+| 2 | Batch B | `variants` has `unique (store_id, …)` but no `store_id` column; it only reaches the store via `product_id`. | **Applied:** add `store_id` to `variants` (1.8: no Shopify id without `store_id` beside it). |
+| 3 | Batch C | No unique keys on `orders`, `customers`, `products`. 1.7 upserts need them. | **Applied:** `unique (store_id, shopify_order_id)`, `unique (store_id, order_number)`, `unique (store_id, shopify_customer_id) where not null`, `unique (store_id, shopify_product_id)`. `shopify_order_id` is nullable for `consignment` orders, which have none. |
+| 4 | Batch C | `webhook_events.shopify_event_id unique` on its own; 1.8 says composite. | **Applied:** `unique (store_id, shopify_event_id)`. |
+| 5 | Batch C | Money columns `subtotal, discount, shipping, tax` and `order_lines.unit_price, discount, total` have no `_paisa` suffix. | **Applied:** every money column ends in `_paisa` (1.1), so a PKR value can never be mistaken for paisa in SQL. |
+| 6 | Batch C | 1.3 says the order row carries a derived `state`; `orders` has no such column. | **Applied:** `order_states` view (1.10), so it cannot be written by hand. |
+| 7 | Batch C | COD orders are often guest checkouts with no Shopify customer. | **Applied:** a `customers` row is created from the shipping address when there is no `shopify_customer_id`; `index (phone_e164)` serves the cross-store history lookup. |
+| 8 | Batch C | `customers.email` goes beyond 1.9 (name, phone, address only). | **Decide:** drop it, or amend 1.9. Default in the steps: not stored. |
+| 9 | Batch D | `shipments.customer_phone` is a second copy of PII. | **Applied:** kept for matching unmatched shipments, but covered by the same accountant serialiser rule as `customers`. |
+| 10 | Batch D | No unique keys on `shipment_charges`, `cod_payouts`, `payout_lines`. | **Applied:** `unique (shipment_id, kind)` (upserted: PostEx corrects fees late), `unique (postex_account_id, cpr_number)`, `unique (cod_payout_id, shipment_id)`. |
+| 11 | Batch D | PostEx's payment status gives the CPR and date per shipment, not a net amount. | **Applied:** `payout_lines.amount_paisa` = COD − charges; `cod_payouts.amount_paisa` = sum of lines, checked against the portal statements (ACC-8). |
+| 12 | Batch D | No status code for "picked up". | **Applied:** stock moves `warehouse → in_transit` when a shipment first appears in PostEx, matching the proposal's "dispatched = with PostEx". `0002` cancelled by merchant moves it back. |
+| 13 | Batch D | No `returns` table; the returns register needs a warehouse check-in with condition and person. | **Applied:** no new table. The register is a view over `0040`/`0006` events plus the check-in stock move (`returning → warehouse` or `→ damaged`, with `actor_id`). |
+| 14 | Batch D | `reconciliation_items` links only a shipment or an order; `cost_missing`, `negative_stock`, `variant_unmapped` concern a variant. | **Applied:** the variant id goes in `detail`; `kind` + `detail` are indexed. |
+| 15 | Batch E | `locations.partner_id` and `retail_partners.location_id` point at each other. | **Applied:** keep `locations.partner_id` only. A two-way FK needs deferred constraints and can disagree. |
+| 16 | Batch E | `stock_moves` has no idempotency key. 1.7 requires reruns to be identical. | **Applied:** `unique (ref_type, ref_id, variant_id, from_location_id, to_location_id)`; `qty > 0`; `from ≠ to`; no UPDATE/DELETE. |
+| 17 | Batch G | `journal_entries` has no idempotency key either. | **Applied:** `unique (source_type, source_id) where reversed_by is null`; a reversal is its own entry with `source_type = 'reversal'`. |
+| 18 | Batch A | No place for two-step login secrets (proposal §8). | **Applied:** `users.totp_secret` (encrypted), `user_recovery_codes`, added with FND-4. |
+| 19 | Batch A | `postex_accounts.store_id` nullable. Shipments need a store for matching and reporting. | **Applied:** nullable in the table, but matching refuses to run for an account with no store, and says so in `/integrations/status`. |
+
+---
+
+## 3. Build steps
+
+Each phase maps to one or more schema batches. Step ids use phase codes so they cannot be
+confused with batch letters.
+
 ### Conventions
 
-- Migrations: plain numbered SQL in `backend/migrations/NNNN_name.sql`, applied by a small runner
-  on `postgres.js` with a `schema_migrations` table and a Postgres advisory lock. Forward only.
-  Numbers in this plan are indicative; steps that add a table take the next free number.
-- Modules live in `backend/src/modules/<name>/` with `repo.ts` (SQL), `service.ts` (rules),
-  `routes.ts` (HTTP, zod-validated). Integrations stay in `src/integrations/`.
-- Tests: Vitest. Integration tests run against a Neon branch (`DATABASE_URL_TEST`), never the
-  main branch. PostEx and Shopify tests use **recorded real responses** in `test/fixtures/`.
-- Frontend: React Router, TanStack Query, Recharts. One page per module, one query hook per
-  endpoint in `src/lib/queries/`.
+- Migration files: `backend/migrations/NNNN_name.sql`, forward only, runner takes a Postgres
+  advisory lock so web and worker can both start without racing.
+- Modules live in `backend/src/modules/<name>/` with `repo.ts` (SQL + typed rows), `service.ts`
+  (rules), `routes.ts` (HTTP, zod-validated). Integrations stay in `src/integrations/`.
+- Tests: Vitest. Integration tests run against a Neon branch (`DATABASE_URL_TEST`), never main.
+  PostEx and Shopify tests use **recorded real responses** in `test/fixtures/`.
+- Frontend: React Router, TanStack Query, Recharts. One query hook per endpoint in
+  `src/lib/queries/`.
 - Every step ends with `npm run typecheck`, `npm test` (backend) and `npm run build`,
   `npm run lint` (frontend) green.
 
----
-
-## 2. Phase map
+### Phase map
 
 Follows proposal §13. Two releases, each signed off before the next phase starts.
 
-| Phase | Steps | Weeks | Ends with |
+| Phase | Batches | Weeks | Ends with |
 | --- | --- | --- | --- |
-| A. Foundation | A1–A8 | 1 | Schema, both ledgers, users and roles, worker process, deploy on Render |
-| B. Orders & shipments | B1–B9 | 1–2 | Both stores and both PostEx accounts syncing, matched, posting to the ledgers |
-| C. Returns control | C1–C6 | 2 | Returns register, charges, payouts, review queue, alerts |
-| D. Confirmation desk | D1–D5 | 2 | Agents confirming orders in the platform |
-| **Release 1** | R1 | end of week 2 | **Orders, returns and confirmations live** (30% milestone) |
-| E. Inventory & purchase | E1–E7 | 3 | Partners, counts, consignment, purchase flow, costs, opening stock |
-| F. Sales & PR | F1–F5 | 3 | Consignment invoicing, influencer PR tracking |
-| G. Accounting & profit | G1–G8 | 3–4 | Remaining postings, ledgers, P&L, profit dashboards, history import |
-| H. UAT & go-live | H1–H5 | 4 | **Full go-live** (after UAT: final 30%) |
+| FND Foundation | A | 1 | Runner, users and roles, worker, deploy on Render |
+| ORD Catalogue & orders | B, C | 1 | Both stores syncing by webhook and poll |
+| SHP Shipments & returns | D | 1–2 | Both PostEx accounts syncing, matched, returns register, payouts, reconciliation |
+| CNF Confirmation desk | H (confirmation part) | 2 | Agents confirming orders in the platform |
+| **R1 Release 1** | | end of week 2 | **Orders, returns and confirmations live** (30% milestone) |
+| INV Inventory & consignment | E | 3 | Stock ledger replayed from history, partners, counts |
+| PUR Purchase | F | 3 | Request → quote → PO → receipt → bill → payment |
+| PR Influencer PR | H (PR part) | 3 | PR sends, detection, results |
+| ACC Accounting & profit | G | 3–4 | Journal replayed from history, reports, close, profit dashboards |
+| UAT UAT & go-live | | 4 | **Full go-live** (final 30%) |
 
 ---
 
-## Phase A — Foundation (week 1)
+### Phase FND — Foundation (week 1, Batch A)
 
-### A1. Migration runner and test harness
-- `src/db/migrate.ts`, `npm run migrate`, `schema_migrations`, advisory lock so web and worker
-  can both start without racing.
-- Add Vitest; `npm test` runs unit tests, `npm run test:db` runs against `DATABASE_URL_TEST`.
+**FND-1. Migration runner and test harness**
+- `src/db/migrate.ts`, `npm run migrate`, `0001_foundations.sql` with Batch A.
+- Vitest; `npm test` for unit tests, `npm run test:db` against `DATABASE_URL_TEST`.
 - `src/lib/money.ts` (1.1: parse `"1250.00"` → `125000n`, format for display) and
-  `src/lib/time.ts` (1.2: Karachi day/month boundaries, `parseKarachiLocal()` for PostEx strings),
-  both with unit tests. The only two places those conversions happen.
-- **Done when:** `npm run migrate` on an empty Neon branch creates `schema_migrations`; running it
-  twice is a no-op; money/time tests pass, including a PostEx timestamp across midnight UTC.
+  `src/lib/time.ts` (1.2: Karachi day/month boundaries, `parseKarachiLocal()` for PostEx strings).
+  The only two places those conversions happen.
+- **Done when:** runner applies Batch A on an empty Neon branch and is a no-op the second time;
+  money/time tests pass, including a PostEx timestamp near midnight Karachi.
 
-### A2. Core schema
-Migration `0001_core.sql`:
-- `stores` (`id`, `key`, `label`, `shop_domain`, `currency`) seeded with `nur`, `organics`.
-- `postex_accounts` (`id`, `key`, `label`, `store_id`) seeded; the account → store link is a row.
-- `users`, `user_sessions` (for revocation), `audit_log` (`actor`, `action`, `entity`,
-  `entity_id`, `before`, `after`, `at`).
-- `sync_runs` (`job`, `scope`, `started_at`, `finished_at`, `status`, `stats jsonb`, `error`) and
-  `sync_cursors` (`job`, `scope`, `cursor`).
-- `webhook_events` (`store_id`, `shopify_event_id`, `topic`, `received_at`), unique
-  `(store_id, shopify_event_id)` (1.7).
-- `review_items` (`kind`, `entity`, `entity_id`, `detail jsonb`, `state` open/resolved/ignored,
-  `resolved_by`, `resolution`), the one queue every "unknown" lands in.
-- **Done when:** migration applies on a fresh branch; seeds present; `/ready` still green.
+**FND-2. Seed from config on boot**
+- On start, upsert `stores` and `postex_accounts` from `config.shopify.stores` and
+  `config.postex.accounts` by `key`. Labels update; rows are never deleted.
+- **Done when:** removing a store from `.env` leaves its row and data intact; adding one creates it.
 
-### A3. Real users and roles
-- Replace the env single-user in `src/auth/session.ts` with the `users` table. Password hashing
-  with `node:crypto` scrypt (no native build on Render). Keep the `/auth/login` and `/auth/me`
-  shapes so the frontend does not change.
-- Roles: `owner`, `manager`, `operations`, `agent`, `accountant` (proposal §8). A
-  `requireRole(...)` middleware and a `permissions.ts` map of role → capabilities.
-- Response serialisers take the role and drop PII fields for `accountant` (1.9). Routes never
-  hand-pick fields.
-- `npm run user:create` CLI for the first owner; env credentials only as a bootstrap when the
-  table is empty, and refused in production.
-- Frontend: `SessionUser.role` widened; nav items hidden by role.
-- **Done when:** owner can sign in from the DB user; an `accountant` token gets 403 on an
-  agent-only route; env fallback disabled in production.
+**FND-3. Real users and roles**
+- Replace the env single-user in `src/auth/session.ts` with `users`. Password hashing with
+  `node:crypto` scrypt (no native build on Render). `/auth/login` and `/auth/me` keep their shapes.
+- Roles: `owner`, `manager`, `operations`, `agent`, `accountant` (proposal §8). `requireRole(...)`
+  and a `permissions.ts` map.
+- Role-aware response serialisers drop PII (`phone_e164`, addresses, `shipments.customer_phone`)
+  for `accountant` (1.9). Routes never hand-pick fields.
+- `npm run user:create` for the first owner; env credentials only as a bootstrap when `users` is
+  empty, refused in production.
+- **Done when:** owner signs in from the DB; an accountant token gets 403 on agent routes and no
+  PII on shared routes (API tests).
 
-### A4. Two-step login for owner and manager
-- TOTP (RFC 6238) on `node:crypto`, enrolment QR on first sign-in, recovery codes hashed.
-- **Done when:** owner and manager cannot get a session token without a valid code; other roles
-  unaffected.
+**FND-4. Two-step login for owner and manager**
+- TOTP on `node:crypto`, `users.totp_secret` encrypted with a key from env, hashed recovery codes.
+- **Done when:** owner and manager cannot get a token without a valid code.
 
-### A5. Audit log helper
-- `audit(sql, actor, action, entity, before, after)` used inside the same transaction as the
-  change. Required for stock adjustments, manual status changes, cost changes, expenses.
-- **Done when:** a helper test shows the audit row rolls back with a failed transaction.
+**FND-5. Audit log helper**
+- `audit(sql, actor, action, entity, before, after)` inside the same transaction as the change.
+- **Done when:** the audit row rolls back with a failed transaction (test).
 
-### A6. Worker process and scheduler
-- `src/worker.ts`, a second entry point (`npm run worker`) for the Render background worker.
-- In-process scheduler: each job is `{ name, everyMs, run }`, guarded by
-  `pg_try_advisory_lock` so two instances never run the same job, and recorded in `sync_runs`.
-- **No DB-polling job queue** (pg-boss etc.): it keeps Neon awake around the clock and breaks the
-  months 1–4 scale-to-zero budget in proposal §10. See risk R3.
-- `GET /api/v1/sync/runs` (owner/manager) lists recent runs.
-- **Done when:** a no-op job runs on schedule, a second worker instance skips it, and its run
-  appears in `sync_runs`.
+**FND-6. Worker and scheduler**
+- `src/worker.ts` (`npm run worker`) for the Render background worker. Jobs are
+  `{ name, everyMs, run }`, guarded by `pg_try_advisory_lock`, recorded in `sync_runs`, cursors
+  in `integration_cursors`.
+- **No DB-polling job queue** (pg-boss etc.): it keeps Neon awake and breaks the scale-to-zero
+  budget in proposal §10. See risk R3.
+- **Done when:** a no-op job runs on schedule, a second worker skips it, `sync_runs` records it.
 
-### A7. Deploy to Render (Singapore)
-- `render.yaml`: web service (`npm run build && npm run migrate && npm start`), background
-  worker, static site for `frontend/` with `VITE_API_URL`. Health check on `/health`.
-- Neon project in Singapore; a `main` branch and a `dev` branch.
-- Fix while here: `frontend/src/lib/api.ts` `IntegrationStatus` uses `ready`, backend returns
-  `configured`.
-- **Done when:** the deployed dashboard signs in over HTTPS and shows all four integrations green.
-
-### A8. Ledger foundations (stock and money)
-Migration `0002_ledgers.sql`. Schema and write helpers only; the flows come with their modules.
-- `locations` (`id`, `type` per 1.4, `name`, `partner_id` nullable), seeded with one each of
-  `warehouse`, `in_transit`, `returning`, `customer`, `marketing`, `damaged`, `supplier`,
-  `adjustment`. `partner` rows are added in E1.
-- `stock_moves` exactly as 1.4, plus `unit_cost` and a unique
-  `(ref_type, ref_id, variant_id, from_location, to_location)` so sync-driven moves are
-  idempotent. `qty > 0`, `from ≠ to`, no UPDATE/DELETE (trigger).
-- `stock_quants` (`variant_id`, `location_id`, `qty`) maintained in the same transaction as each
-  move; `npm run stock:rebuild` recomputes it from `stock_moves` and diffs.
-- `accounts` (chart of accounts, both brands as a `store_id` dimension on lines rather than two
-  charts), `journal_entries` (`date`, `memo`, `ref_type`, `ref_id`, `period`), `journal_lines`
-  (`account_id`, `debit`, `credit`, `store_id`). A deferred constraint trigger rejects any entry
-  whose lines do not balance. No UPDATE/DELETE.
-- `moveStock()` and `postJournal()` in `src/ledgers/`: the only way to write either table.
-- **Done when:** an unbalanced entry fails to commit; a move without a counterpart cannot be
-  expressed; `stock:rebuild` on a scripted scenario reports zero diff.
+**FND-7. Deploy to Render (Singapore)**
+- `render.yaml`: web service (`build → migrate → start`), background worker, static site with
+  `VITE_API_URL`. Neon project in Singapore with `main` and `dev` branches.
+- Fix while here: frontend `IntegrationStatus` expects `ready`, backend returns `configured`.
+- **Done when:** the deployed dashboard signs in over HTTPS with all four integrations green.
 
 ---
 
-## Phase B — Orders & shipments (weeks 1–2)
+### Phase ORD — Catalogue & orders (week 1, Batches B and C)
 
-### B1. Order schema
-Migration `0003_orders.sql`:
-- `shopify_raw` (`store_id`, `topic`, `shopify_id`, `payload jsonb`, `received_at`).
-- `customers` (`id`, `phone_e164` unique, name, address, city). One row per phone across both
-  stores: refusal history is per customer, not per store (1.9).
-- `orders` (`store_id`, `shopify_order_id`, `name` e.g. `#63648`, `customer_id`,
-  `financial_status`, `fulfillment_status`, `cancelled_at`, `total`, `cod_amount`,
-  `discount_codes text[]`, `tags text[]`, `city`, `placed_at`, `updated_at_shopify`, `state`),
-  unique `(store_id, shopify_order_id)` and `(store_id, name)`.
-- `order_lines` (`order_id`, `variant_id`, `sku`, `title`, `qty`, `unit_price`, `discount`).
-- `products`, `variants` (`store_id`, `shopify_variant_id`, `sku`, `title`, `active`), unique
-  `(store_id, shopify_variant_id)`.
-- `orders.state` is written **only** by `refreshOrderState(orderId)`, which derives it from the
-  latest confirmation, the shipment status and the money postings (1.3). No route sets it.
-- **Done when:** migration applies; constraints reject a duplicate order; a test shows
-  `refreshOrderState` is the only writer (a source-grep test in `npm test`).
+**ORD-1. Catalogue schema and sync**
+- `0002_catalogue.sql`: Batch B with review notes 2.
+- Job `shopify.catalogue.poll` hourly per store; `products/update` webhook later reuses the mapper.
+- Unmapped variants screen: variants with `sku IS NULL`, per store.
+- **Done when:** both catalogues load; Juggun's Organics variants without SKUs are listed, not
+  rejected.
 
-### B2. Shopify order mapper
-- `src/integrations/shopify/queries.ts`: one GraphQL fragment for orders (lines, shipping
-  address, discount codes, tags, cancel reason).
-- `src/modules/orders/mapper.ts`: Shopify order → rows, pure function, tested against recorded
-  payloads from both stores. Phone normalised to `+92…` here.
-- **Done when:** fixture tests cover a COD order, a cancelled order, a fully discounted PR order
-  and an order with a confirmation tag.
+**ORD-2. Order schema and mapper**
+- `0003_orders.sql`: Batch C with review notes 3–8; `order_states` view.
+- `src/integrations/shopify/queries.ts` (order fragment: lines, shipping address, discount codes,
+  tags, cancel reason) and `src/modules/orders/mapper.ts`, pure, phone normalised to `+92…`.
+- **Done when:** fixture tests cover a COD order, a guest checkout, a cancelled order, a fully
+  discounted PR order and an order with a confirmation tag.
 
-### B3. Shopify catch-up poll (15 minutes)
-- Job `shopify.orders.poll` per store: `orders(query: "updated_at:>=CURSOR")` with a 10-minute
-  overlap, paged, upsert, advance cursor only after commit.
-- Products/variants poll hourly.
-- **Done when:** first run loads the last 60 days for both stores; the 1.7 test passes: running
-  the poll twice leaves every table byte-identical (row hashes compared); counts match the
-  Shopify admin for a sample day.
+**ORD-3. Catch-up poll (15 minutes)**
+- Job `shopify.orders.poll` per store: `updated_at >= cursor − 10 min`, paged, upsert, advance the
+  cursor only after commit.
+- **Done when:** first run loads the last 60 days for both stores; **the 1.7 test**: running the
+  poll twice leaves every row identical (row hashes compared); counts match Shopify admin for a
+  sample day.
 
-### B4. Shopify webhooks
-- `POST /webhooks/shopify/:store` registered with `express.raw()` **before** `express.json()`
-  (comment already in `app.ts`). HMAC-SHA256 over the raw body with the store's client secret,
-  constant-time compare. Insert into `webhook_events` on `X-Shopify-Event-Id`; on conflict, answer
-  200 and do nothing. Store raw, upsert, answer 200 fast.
+**ORD-4. Webhooks**
+- `POST /webhooks/shopify/:store` with `express.raw()` before `express.json()`. HMAC-SHA256 over
+  the raw body with the store's client secret, constant-time compare. Insert into
+  `webhook_events` on `(store_id, X-Shopify-Event-Id)`; on conflict answer 200 and stop. Process,
+  set `processed_at`.
 - Topics: `orders/create`, `orders/updated`, `orders/cancelled`, `products/update`,
-  `app/uninstalled`. Subscriptions created by `npm run shopify:webhooks` (idempotent).
+  `app/uninstalled`. `npm run shopify:webhooks` registers them idempotently.
 - **Done when:** a test order on each store appears within seconds; a tampered body gets 401; a
-  replayed event id changes nothing.
+  replayed event id changes nothing; unprocessed events are retried by the poll.
 
-### B5. Shipment schema and PostEx mapper
-Migration `0004_shipments.sql`:
-- `postex_raw` (`postex_account_id`, `endpoint`, `tracking_number`, `payload jsonb`, `fetched_at`).
-- `shipments` (`postex_account_id`, `tracking_number`, `order_ref`, `order_id` nullable,
-  `raw_status`, `status` canonical, `cod_amount`, `delivery_fee`, `delivery_tax`, `return_fee`,
-  `return_tax`, `city`, `items`, `booked_at`, `picked_at`, `delivered_at`, `returned_at`,
-  `last_status_at`, `cod_payout_id` nullable, `match_state`), unique
-  `(postex_account_id, tracking_number)` (1.8).
-- `shipment_events` (`shipment_id`, `code`, `message`, `occurred_at`), unique on all four.
-- `postex_status_codes` (`code`, `canonical`, `is_failed_attempt`, `is_terminal`), seeded from
-  the verified codes (`0005` delivered, `0013` failed attempt, `0006` returned to merchant, …).
-  Canonical: `booked`, `picked`, `in_transit`, `out_for_delivery`, `attempted`, `delivered`,
-  `returning`, `returned`, `cancelled`, `unknown`.
-- `src/integrations/postex/mapper.ts`: PostEx parcel → rows. Every PostEx timestamp goes through
-  `parseKarachiLocal()` here and nowhere else (1.2). Amounts through `money.ts`.
-- **Done when:** migration applies; seed covers every code seen in the recorded history; mapper
-  fixture tests pass.
-
-### B6. PostEx sync and the transition handler
-- Job `postex.shipments.list` per account: `listOrders` over a rolling booked-date window
-  (last 45 days) to discover new shipments.
-- Job `postex.shipments.track`: `trackBulk` for every non-terminal shipment, with adaptive cadence:
-  every 10 minutes for `out_for_delivery`/`attempted`, 30 minutes otherwise, daily for shipments
-  terminal < 7 days (late fee corrections).
-- Status derived from **history codes**, not the label (labels differ between endpoints, see
-  README). Unknown code → `status = unknown` + review item.
-- `transitions.ts` (1.10), one function per edge, each in one transaction with the status update:
-
-  | Transition | Stock (1.4) | Journal (1.5) |
-  | --- | --- | --- |
-  | picked up by PostEx | `warehouse → in_transit` | none |
-  | failed attempt, retry | none | none |
-  | **delivered** | `in_transit → customer` | sale, COGS (if cost known), forward charge + tax |
-  | return started | `in_transit → returning` | none |
-  | returned to merchant | none (not yet checked in) | return charge + tax |
-  | checked in (C2) | `returning → warehouse` or `→ damaged` | damaged: write-off |
-
-  The **delivered** edge is the only place revenue is recognised (1.6).
-- **Done when:** every shipment since 14 May 2026 on the NUR account is in `shipments`; running
-  the full sync twice leaves shipments, events, stock moves and journal identical; totals
-  reproduce proposal §3 for 14 May – 19 Sep (1,073 booked, 117 returned, PKR 27,787 return
-  charges, PKR 209,009 delivery charges); a test proves an in-transit order posts zero revenue.
-
-### B7. Shipment ↔ order matching
-- Normalise `orderRefNumber` (`#63648`, `63648`, `NUR-63648`) → `(store_id, name)` via the
-  account's store.
-- Fallback for manual bookings: same store, COD amount equal, city equal, booked within 3 days of
-  the order, unique candidate only → `match_state = 'suggested'`; anything else → `unmatched`
-  review item. A person confirms suggestions.
-- Stock moves need order lines, so an unmatched shipment's transitions are held and replayed
-  through `transitions.ts` once it is linked.
-- **Done when:** ≥ 95% of NUR shipments auto-match (proposal §9 measured 95.4%); every other one
-  is in the queue, none silently dropped; linking one replays its held transitions.
-
-### B8. Orders and shipments API
-- `GET /orders` (filters: store, state, city, date, search by name/phone/tracking),
-  `GET /orders/:id` with lines, shipment, timeline, charges.
-- `GET /shipments` (filters: status, city, store, date, days in transit).
-- Serialised through A3's role-aware serialisers.
-- **Done when:** an order lookup returns order + shipment + timeline in one call; an accountant
-  response has no phone or address field (API test, not UI).
-
-### B9. Orders and shipments pages
-- Frontend: add React Router, TanStack Query; pages `/orders`, `/orders/:id`, `/shipments`.
-  Timeline component (PostEx events next to Shopify events).
-- **Done when:** search by order number, tracking number or phone works on a phone-width screen.
+**ORD-5. Orders API and pages**
+- `GET /orders` (store, state, city, date, search by number/phone), `GET /orders/:id`.
+- Frontend: React Router, TanStack Query, `/orders`, `/orders/:id`.
+- **Done when:** search by order number or phone works on a phone-width screen.
 
 ---
 
-## Phase C — PostEx logistics & returns control (week 2)
+### Phase SHP — Shipments & returns (weeks 1–2, Batch D)
 
-### C1. Failed deliveries
-- `shipment_attempts` view: each `is_failed_attempt` event with the reason parsed from the message
-  (`RFD(REFUSED TO RECEIVE)` → `refused`, not available, incomplete address, wants to open).
-- **Done when:** the Shipments page filters by reason and shows attempt counts.
+**SHP-1. Logistics schema and PostEx mapper**
+- `0004_logistics.sql`: Batch D with review notes 9–14.
+- `src/integrations/postex/status-codes.ts`: every code seen in recorded history mapped to a
+  behaviour; the six in Batch D drive transitions, the rest are informational. Unknown code →
+  reconciliation item.
+- `src/integrations/postex/mapper.ts`: parcel → `shipments`, `shipment_events`,
+  `shipment_charges`, using the verified field names. Every timestamp through
+  `parseKarachiLocal()`, every amount through `money.ts`, here and nowhere else.
+- **Done when:** mapper fixture tests pass for delivered, refused-and-returned, cancelled and
+  zero-COD parcels.
 
-### C2. Returns register and warehouse check-in
-- Migration: `returns` (`shipment_id`, `reason`, `refused_at`, `returned_to_merchant_at`,
-  `return_fee`, `checked_in_at`, `checked_in_by`, `condition` `restocked|damaged`, `notes`).
-- Created when a shipment reaches `returned`. Check-in (operations role) calls the
-  `checked in` edge in `transitions.ts`, audited.
-- **Done when:** all 117 historical returns are in the register with fee and dates; the
-  `returning` location holds exactly the units of returns not yet checked in.
+**SHP-2. PostEx sync**
+- Job `postex.shipments.list` per account: rolling 45-day booked window to discover shipments.
+- Job `postex.shipments.track`: `trackBulk` for non-terminal shipments; every 10 minutes for
+  out-for-delivery/attempted, 30 minutes otherwise, daily for 7 days after a terminal code (late
+  fee corrections). Respects the client's 1 req/s throttle.
+- **Done when:** every NUR shipment since 14 May 2026 is loaded; running the sync twice changes
+  nothing; totals reproduce proposal §3 for 14 May – 19 Sep (1,073 booked, 117 returned,
+  PKR 27,787 return charges, PKR 209,009 delivery charges).
 
-### C3. COD payouts
-- Migration: `cod_payouts` (`postex_account_id`, `cpr_number`, `settled_at`, `amount`), unique
-  `(postex_account_id, cpr_number)`; `shipments.cod_payout_id` links each shipment to its payout.
-- Job `postex.payments`: `paymentStatus` for delivered, unsettled shipments (daily, oldest first).
-  A new payout posts PostEx receivable → bank.
-- Ageing buckets 0–7, 8–14, 15–30, 30+ Karachi days (proposal §6.5).
-- **Done when:** the sample from proposal §3 (delivered 27 June, settled 2 July) shows correctly;
-  "cash with PostEx" equals the PostEx receivable balance in the journal.
+**SHP-3. The transition handler**
+- `src/modules/shipments/transitions.ts`, one function per edge, run in the same transaction as
+  the event insert. Effects arrive with their batch; the edges are fixed now:
 
-### C4. Review queue
-- Kinds in `review_items`: `shipment_unmatched`, `match_suggested`, `cod_mismatch` (shipment COD ≠
-  order outstanding), `possible_duplicate` (two live shipments, one order), `stuck_in_transit`,
-  `unknown_status`, `return_not_checked_in`, `payout_overdue`, `cost_missing`,
-  `negative_stock`, `variant_unmapped`.
-- Generated by an hourly job; items resolve themselves when the condition clears.
-- **Done when:** each kind has a test that creates and clears it; queue page lets a manager link a
-  shipment to an order.
+  | Edge | Shipment | Stock (INV) | Journal (ACC) |
+  | --- | --- | --- | --- |
+  | first seen in PostEx | `booked_at` | `warehouse → in_transit` | — |
+  | `0002` cancelled by merchant | terminal | `in_transit → warehouse` | — |
+  | `0013` attempt made | `attempts_count++`, `last_failure_reason` | — | — |
+  | `0008` under review | flag | — | — |
+  | **`0005` delivered** | `delivered_at` | `in_transit → customer` (or `→ marketing` for PR) | sale + COGS + forward charge & tax (or marketing expense for PR) |
+  | `0040` return initiated | | `in_transit → returning` | — |
+  | `0006` returned at merchant | awaiting check-in | — | reversal charge & tax |
+  | warehouse check-in (SHP-5) | | `returning → warehouse` or `→ damaged` | damaged: write-off |
 
-### C5. Alerts
-- Rules from proposal §6.6: return delivered back but not checked in after N days, shipment stuck
-  longer than N days, payout overdue > 14 days, sync job failing twice in a row, unknown status.
-- Shown as a badge + list in the dashboard; email later if asked (not in scope).
-- **Done when:** thresholds are editable in settings and each alert links to its item.
+- The `0005` edge is the only place revenue is recognised (1.6).
+- **Done when:** a test per edge; a test that an order placed, confirmed, booked and in transit
+  contributes zero revenue.
 
-### C6. First dashboard
-- Overview tiles become real: delivered revenue (sales account in the journal), return rate,
-  delivery success rate, cash with PostEx (receivable). Net profit stays "—" until costs load.
-- Returns-by-city chart (Recharts, chart tokens already in `index.css`), charges by month.
-- **Done when:** tiles for 14 May – 19 Sep match proposal §3 figures.
+**SHP-4. Shipment ↔ order matching**
+- Normalise `orderRefNumber` (`#63648`, `63648`, `NUR-63648`) → `(store_id, order_number)` via
+  the account's store. `match_method = 'ref'`, `match_confidence = 1`.
+- Fallback for manual bookings: same store, equal COD, equal city, booked within 3 days of the
+  order, single candidate → `match_method = 'heuristic'`, a `match_suggested` item for a person.
+  Anything else → `shipment_unmatched`.
+- **Done when:** ≥ 95% of NUR shipments match by ref (proposal §9 measured 95.4%); every other one
+  is in the queue; none silently dropped.
+
+**SHP-5. Failed deliveries and returns register**
+- Failed deliveries view: `0013` events with the reason code (RFD refused, CNA not available,
+  ICA incomplete address, OPN wants to open) and attempt counts.
+- Returns register view (review note 13) with reason, refusal date, return date, reversal charge,
+  check-in state. Check-in action for `operations`, audited.
+- **Done when:** all 117 historical returns appear with charge and dates; check-in records who and
+  when, and (once INV lands) moves the stock.
+
+**SHP-6. COD payouts**
+- Job `postex.payments` daily: `paymentStatus` for delivered shipments without a payout line,
+  oldest first; `cpr1`/`cpr1Date` → `cod_payouts` + `payout_lines` (review note 11).
+- Ageing of delivered-unpaid: 0–7, 8–14, 15–30, 30+ Karachi days (proposal §6.5).
+- **Done when:** the proposal §3 sample (delivered 27 June, paid 2 July) is correct; "cash with
+  PostEx" has a real number.
+
+**SHP-7. Reconciliation queue and alerts**
+- Kinds: `shipment_unmatched`, `match_suggested`, `cod_mismatch`, `possible_duplicate`,
+  `stuck_in_transit`, `under_review`, `unknown_status`, `return_not_checked_in`,
+  `payout_overdue` (> 14 days), `sync_failing`. Later: `variant_unmapped`, `cost_missing`,
+  `negative_stock`.
+- Hourly job opens items and resolves them when the condition clears. Thresholds in
+  `app_settings`.
+- Queue page: link a shipment to an order, resolve, ignore with a note.
+- **Done when:** each kind has a create-and-clear test.
+
+**SHP-8. Shipments pages and first dashboard**
+- `/shipments` (status, city, store, date, days in transit), timeline on `/orders/:id`.
+- Overview tiles: *Delivered COD* (1.10), return rate, delivery success rate, cash with PostEx.
+  Net profit stays "—". Returns-by-city and charges-by-month charts.
+- **Done when:** tiles for 14 May – 19 Sep match proposal §3.
 
 ---
 
-## Phase D — Order confirmation desk (week 2)
+### Phase CNF — Confirmation desk (week 2, Batch H part 1)
 
-### D1. Confirmation model
-- Migration: `confirmations` (`order_id`, `attempt`, `agent_id`, `channel` whatsapp/call,
-  `outcome` confirmed/no_answer/changed/cancelled, `reason`, `at`). The confirmation part of
-  `orders.state` is derived from these rows by `refreshOrderState`, never set directly.
-- Import existing confirmation tags from Shopify on first load (proposal §6.4) as historical
-  confirmation rows.
-- **Done when:** historical orders carry the state implied by their tags.
+**CNF-1. Confirmation schema and history**
+- `0005_confirmations.sql`: `confirmations`, `confirmation_attempts` (review note 1).
+- A `pending` confirmation is created for every new COD order. Existing Shopify confirmation tags
+  become historical confirmations on first load (proposal §6.4).
+- **Done when:** historical orders show the state their tags implied.
 
-### D2. Queue and customer history
-- `GET /confirmations/queue`: COD orders from both stores, not yet confirmed, oldest first,
-  `no_answer` returning after the retry delay; after N attempts → `unreachable` for a manager.
-- Each row: items, amount, city, the customer's delivered/refused counts by `phone_e164`, city
-  return rate, repeat-refuser flag.
-- **Done when:** a new Shopify order appears in the queue within seconds of the webhook.
+**CNF-2. Queue and customer history**
+- Queue: pending and due `no_answer` (`next_attempt_at <= now`) from both stores, oldest first;
+  after N attempts → `unreachable` for a manager.
+- Each row: items, amount, city, delivered/refused counts for the same `phone_e164` across both
+  stores, city return rate, repeat-refuser flag.
+- **Done when:** a new Shopify order is in the queue within seconds of its webhook.
 
-### D3. Agent actions
-- WhatsApp click-to-chat (`https://wa.me/<phone>?text=<template>`), message template per store in
-  settings; `tel:` link for calls. One click to record the outcome.
-- Optional: write a `confirmed` tag back to Shopify (needs `write_orders`; off by default).
-- **Done when:** an agent can work the queue end to end on a phone.
+**CNF-3. Agent actions**
+- `https://wa.me/<phone>?text=<template>` with the store's template from `app_settings`; `tel:`
+  for calls; one click records an attempt and its outcome.
+- Optional `confirmed` tag written back to Shopify (needs `write_orders`; off by default).
+- **Done when:** an agent works the queue end to end on a phone.
 
-### D4. Release for dispatch
-- "Ready to book" list = confirmed, no shipment yet. When B7 matches a shipment the order moves to
-  dispatched automatically.
+**CNF-4. Release for dispatch**
+- "Ready to book": confirmed, no shipment. Matching (SHP-4) moves it to dispatched.
 - Alerts: confirmed and not booked within one Karachi business day; shipment booked for a
   cancelled order.
 - **Done when:** both alerts fire in tests.
 
-### D5. Agent performance
-- Confirmation rate and median time-to-confirm by agent, unreachable rate, confirmed-then-refused.
-- **Done when:** report page shows per-agent figures for a date range.
+**CNF-5. Agent performance**
+- Confirmation rate, median time to confirm, unreachable rate, confirmed-then-refused, by agent.
+- **Done when:** the report shows per-agent figures for a date range.
 
-### R1. Release 1 — orders, returns, confirmations
-- Staff accounts created, short guide for agents and warehouse check-in.
+**R1. Release 1 — orders, returns, confirmations**
+- Staff accounts, short guides for agents and warehouse check-in.
 - Two working days of parallel run against the manual sheet.
 - **Done when:** client signs off; 30% milestone invoiced.
 
 ---
 
-## Phase E — Inventory & purchase (week 3)
+### Phase INV — Inventory & consignment (week 3, Batch E)
 
-The ledger has existed since A8 and has been moving shipment stock since B6. This phase adds the
-remaining locations and flows.
+**INV-1. Inventory schema**
+- `0006_inventory.sql`: Batch E with review notes 15–16. Seed one location per kind in 1.4
+  (`warehouse`, `in_transit`, `returning`, `customer`, `marketing`, `damaged`, `supplier`,
+  `adjustment`); `partner` locations come with partners.
+- `moveStock()` in `src/ledgers/stock.ts` is the only writer of `stock_moves` and updates
+  `stock_quants` in the same transaction. `npm run stock:rebuild` recomputes quants and diffs.
+- **Done when:** a move cannot be updated, deleted or made without both locations; rebuild on a
+  scripted scenario reports zero diff.
 
-### E1. Partners and stock views
-- Migration: `partners`; each partner gets a `partner` location.
-- Stock page: quants per (variant, location); `available` = warehouse − open reservations
-  (1.10); days of cover from delivered sales; low-stock thresholds.
+**INV-2. Switch on stock effects and replay history**
+- Enable the stock column of SHP-3. `npm run ledger:replay -- --stock` runs every shipment event
+  and check-in through the handler, in order.
+- **Done when:** replay twice gives identical `stock_moves`; `returning` holds exactly the units
+  of returns not yet checked in; each path in proposal §2's diagram has an end-to-end test.
+
+**INV-3. Opening stock and counts**
+- Opening count (proposal §11 item 11) as dated `adjustment → warehouse` moves. Negative quants
+  before that raise `negative_stock`.
+- Counts, damage and write-offs through `stock_adjustments` + moves, reason and actor required,
+  audited.
+- **Done when:** a count posts the difference as a move, never an overwrite.
+
+**INV-4. Stock views**
+- Quants per (variant, location); `available` (1.10); days of cover from delivered sales;
+  low-stock thresholds in `app_settings`.
 - **Done when:** the stock page and `stock:rebuild` agree for every (variant, location).
 
-### E2. Catalogue across stores
-- Variants stay per store (1.8). An `items` table links variants of both stores **only** where the
-  SKU genuinely matches; otherwise each variant is its own item. Juggun's Organics SKUs assigned
-  here with the client (proposal §11 item 7). Unmapped variants → `variant_unmapped`.
-- **Done when:** every variant sold in the last 60 days is mapped or in the queue.
+**INV-5. Retail partners and consignment**
+- `retail_partners`, each with a `partner` location; `consignment_transfers` move
+  `warehouse → partner`.
+- Partner sales import: template download, preview with validation, commit → a `consignment`
+  order with lines, `partner → customer` moves. Same file twice is rejected.
+- **Done when:** a sample partner sheet imports and the partner's quants drop accordingly.
 
-### E3. Replay and path tests
-- `npm run ledger:replay` rebuilds all shipment-driven moves and postings from `shipment_events`
-  through `transitions.ts` on a Neon branch and diffs against main.
-- **Done when:** replay twice gives identical results; each path in proposal §2's diagram
-  (delivered, cancelled before dispatch, failed then delivered, refused → restocked, refused →
-  damaged) has an end-to-end test.
-
-### E4. Adjustments and counts
-- Physical count, damage, write-off: reason and user required, audited, against the `adjustment`
-  location.
-- **Done when:** a count creates the difference as a move to/from `adjustment`, not an overwrite.
-
-### E5. Consignment transfers and partner sales import
-- Transfer `warehouse → partner`.
-- Partner sheet import: downloadable CSV/XLSX template, preview with validation, then commit
-  (`partner → customer` moves + sale postings, F1).
-- **Done when:** a sample partner sheet imports, and re-importing the same file is rejected.
-
-### E6. Purchase: vendors, requests, quotations, POs, receipts
-- Migration: `vendors`, `purchase_requests`, `quotations`, `purchase_orders`, `po_lines`,
-  `goods_receipts`. Reorder suggestions from delivered-sales velocity (not placed orders).
-- Receipt against a PO, partial receipts, `supplier → warehouse` moves with `unit_cost`.
-- **Done when:** request → quote comparison → PO → partial receipt works for one vendor.
-
-### E7. Costs and opening stock
-- `item_costs` (`item_id`, `cost`, `effective_from`); client's cost sheet imported with dates
-  (proposal §11 item 6). Loading costs posts the deferred COGS for `cost_missing` items, dated at
-  their delivery.
-- Opening counts (proposal §11 item 11) as dated `adjustment → warehouse` opening moves; negative
-  quants flagged by C4 should clear.
-- Stock write-back to Shopify behind a per-store flag, **off** until the client confirms counts
-  match (proposal §6.2 step 6). Needs `write_inventory`.
-- **Done when:** cost at a past date returns the cost in force on that date; `cost_missing` queue
-  is empty; write-back is a dry-run diff until switched on.
+**INV-6. Optional stock write-back to Shopify**
+- Per-store flag, **off** until the client confirms counts match (proposal §6.2 step 6). Needs
+  `write_inventory`. Until then it is a dry-run diff.
+- **Done when:** the diff is visible and nothing is written with the flag off.
 
 ---
 
-## Phase F — Sales & influencer PR (week 3)
+### Phase PUR — Purchase (week 3, Batch F)
 
-### F1. Sales reporting
-- Sales by brand, store, channel, product, city, partner — queries over the journal (1.5) joined
-  to shipments and order lines. No separate sales arithmetic.
-- **Done when:** delivered revenue for 14 May – 19 Sep equals PKR 2.16M collected on 877 parcels.
+**PUR-1. Vendors, requests, quotations, POs**
+- `0007_purchase.sql`: Batch F. Reorder suggestions from delivered-sales velocity, not placed
+  orders (proposal §6.1 step 1).
+- **Done when:** request → quote comparison → PO works for one vendor.
 
-### F2. Consignment invoices and partner payments
-- Invoice per partner import (posted), payments recorded against invoices (posted); partner
-  balance from the ledger.
-- **Done when:** a partner's ledger balance = invoices − payments, with a statement view.
+**PUR-2. Goods receipts**
+- Partial receipts against a PO; each writes a `product_costs` row (effective from receipt date)
+  and `supplier → warehouse` moves.
+- **Done when:** a partial receipt leaves the PO open for the rest.
 
-### F3. Influencer list and PR sends
-- Migration: `influencers` (handle, name, city, followers, niche), `pr_sends` (influencer, items,
-  shipment, cost), `pr_posts` (link, date, type reel/story/post).
-- A PR send's units go `warehouse → in_transit → marketing`; its product cost and PostEx charge
-  post as marketing expense. PR shipments are excluded from sales, return rate and revenue.
-- **Done when:** a PR send ends in `marketing`, posts no revenue, and leaves the return rate
-  unchanged.
+**PUR-3. Bills and payments**
+- Three-way match (PO → receipt → bill) before payment; vendor balance.
+- **Done when:** a bill that does not match its receipt cannot be paid without a manager override,
+  which is audited.
 
-### F4. Detect PR sends made outside the platform
-- Shopify orders tagged `PR` or 100% discounted; PostEx shipments with `invoicePayment = 0`
-  (54 found in proposal §6.8). Suggested as PR sends for a person to confirm.
-- **Done when:** the 54 zero-value shipments appear as suggestions; confirming one re-routes it
-  through the PR edge in `transitions.ts`.
+**PUR-4. Cost import**
+- The client's cost sheet (proposal §11 item 6) into `product_costs` with its dates,
+  `source = 'import'`.
+- **Done when:** cost at any past date returns the cost effective on that date.
 
-### F5. Influencer results
-- Discount code → influencer; delivered orders using it credited. Cost per influencer/campaign vs
-  sales.
+---
+
+### Phase PR — Influencer PR (week 3, Batch H part 2)
+
+**PR-1. Influencers and PR sends**
+- `0008_pr.sql`: `influencers`, `influencer_codes`, `pr_sends`, `pr_send_lines`,
+  `influencer_posts`.
+- A PR send's shipment follows the normal edges but ends in `marketing` (SHP-3), never in sales,
+  returns or the return rate.
+- **Done when:** a delivered PR send ends in `marketing` and leaves the return rate unchanged.
+
+**PR-2. Detect PR sends made outside the platform**
+- Orders tagged `PR` or 100% discounted (`channel = 'pr'`); shipments with `invoicePayment = 0`
+  (54 found in proposal §6.8). Suggested for a person to confirm.
+- **Done when:** the 54 zero-COD shipments appear as suggestions; confirming one re-runs its
+  events through the handler.
+
+**PR-3. Results**
+- Discount code → influencer; delivered orders using it credited. Cost per influencer and
+  campaign vs sales; posts recorded by the team.
 - **Done when:** the report shows cost, posts and attributed delivered sales per influencer.
 
 ---
 
-## Phase G — Accounting & profit (weeks 3–4)
+### Phase ACC — Accounting & profit (weeks 3–4, Batch G)
 
-The journal has existed since A8 with shipment, payout, PR and consignment postings. This phase
-adds the rest and the reports.
+**ACC-1. Accounting schema and posting helper**
+- `0009_accounting.sql`: Batch G with review note 17. A deferred constraint trigger rejects an
+  unbalanced entry; no UPDATE/DELETE on lines.
+- Chart of accounts seeded for both brands (brand as `journal_lines.store_id`, one chart).
+- `postJournal()` in `src/ledgers/journal.ts` is the only writer.
+- **Done when:** an unbalanced entry fails to commit; a duplicate source posts nothing.
 
-### G1. Remaining posting rules
-- Vendor bill (matched to PO and receipt), vendor payment, expenses, customer invoices.
-- **Done when:** each rule has a test; the trial balance balances after a full replay.
+**ACC-2. Posting rules and replay**
+- Enable the journal column of SHP-3, plus payouts (PostEx receivable → bank), goods receipts,
+  vendor bills and payments, consignment invoices and payments, PR sends, write-offs.
+- COGS uses the `product_costs` row effective at the **order date** (Batch B note).
+- `npm run ledger:replay -- --journal` posts all history.
+- **Done when:** the trial balance balances after replay; replay twice posts nothing new; the
+  PostEx receivable equals "cash with PostEx" from SHP-6; journal sales for 14 May – 19 Sep
+  equal *Delivered COD* to the paisa, and the tile switches to the journal.
 
-### G2. Expenses
-- Categories (ads, salaries, rent, packaging…), entry with receipt note, audited.
-- **Done when:** expenses appear in P&L by month and brand.
+**ACC-3. Expenses, invoices and tax**
+- Expense entry by category (ads, salaries, rent, packaging), audited.
+- Invoices for delivered orders and consignment sales; tax via `tax_rates`. No FBR filing
+  (exclusion).
+- **Done when:** expenses appear in P&L; monthly tax totals export to CSV.
 
-### G3. Customer invoicing and sales tax
-- Invoice per delivered order and per consignment sale; sales tax calculated and tracked
-  (no FBR filing — exclusion).
-- **Done when:** tax totals by month export to CSV for the accountant.
+**ACC-4. Bank statements**
+- CSV import into `bank_statements` / `bank_lines`; match to `cod_payouts` and partner/vendor
+  payments; unmatched lines to reconciliation.
+- **Done when:** one real statement month matches its CPR deposits.
 
-### G4. Bank statement import and matching
-- CSV import; auto-match to `cod_payouts` and partner/vendor payments by amount and date;
-  unmatched lines to the review queue.
-- **Done when:** a real statement month matches its CPR deposits.
-
-### G5. Reports and month-end close
-- General Ledger, Trial Balance, Partner Ledger (customers, vendors, retail partners, PostEx),
-  Profit & Loss by month/brand/store — all queries over `journal_lines`.
-- Month close on the 5th of the following month (Karachi): `periods.closed_at`; postings into a
-  closed period are rejected and go in as adjustments in the open period.
+**ACC-5. Reports and month-end close**
+- GL, Trial Balance, Partner Ledger (customers, vendors, retail partners, PostEx), P&L by
+  month/brand/store — queries over `journal_lines` only.
+- `fiscal_periods`: close on the 5th (Karachi); posting into a closed period is rejected and goes
+  in as an adjustment in the next open period.
 - Opening balances from the accountant (proposal §11 item 15).
-- **Done when:** closing September blocks a back-dated posting and the adjustment shows in October.
+- **Done when:** closing September blocks a back-dated posting and the adjustment lands in October.
 
-### G6. Profit dashboards
-- Net profit tile, order funnel (placed → confirmed → dispatched → delivered/returned, count and
+**ACC-6. Profit dashboards**
+- Net profit, order funnel (placed → confirmed → dispatched → delivered/returned, count and
   value), profit per shipment, profit by product **after returns**, by city, cash-flow ageing,
-  inventory value and low stock with days of cover.
+  inventory value, low stock with days of cover.
 - **Done when:** every figure drills down to the orders, shipments or journal entries behind it.
 
-### G7. History import
-- Shopify orders older than 60 days: client's CSV export importer (proposal §11 item 2), and
-  `read_all_orders` if approved — same mapper as B2.
-- Any earlier PostEx account (proposal §11 item 5): add a `postex_accounts` row, run B6.
-- PostEx portal statements to check deductions the API does not show (proposal §11 item 4).
+**ACC-7. History import**
+- Shopify orders older than 60 days from the client's CSV export (proposal §11 item 2) or
+  `read_all_orders` if approved — same mapper as ORD-2.
+- An earlier PostEx account (proposal §11 item 5): new `postex_accounts` row, run SHP-2.
 - **Done when:** history imports into a Neon branch first, totals are checked with the client,
   then it is replayed on main.
 
-### G8. Monthly full export
-- Job on the 1st: every table to CSV in a zip, downloadable by the owner (proposal §8, §17).
-- **Done when:** the export restores into an empty database with matching row counts.
+**ACC-8. Statement check and monthly export**
+- PostEx portal statements (proposal §11 item 4) compared with `cod_payouts` totals.
+- Job on the 1st: every table to CSV in a zip for the owner (proposal §8, §17).
+- **Done when:** payouts agree with statements or each difference is a reconciliation item; the
+  export restores into an empty database with matching row counts.
 
 ---
 
-## Phase H — UAT and go-live (week 4)
+### Phase UAT — UAT and go-live (week 4)
 
-- **H1. Security pass:** role matrix test for every route, PII stripping, rate limit on login,
-  secrets only in Render env, `helmet` CSP on the static site.
-- **H2. Performance:** list endpoints paged and indexed; overview under 1 s on a warm Neon.
-- **H3. Monitoring:** daily sync health check, failed-job alert, unknown-status alert (feeds the
-  maintenance scope in proposal §16).
-- **H4. UAT:** scripted scenarios per module with the client's team; fixes; training and short
+- **UAT-1. Security pass:** role matrix test for every route, PII stripping, login rate limit,
+  secrets only in Render env, CSP on the static site.
+- **UAT-2. Performance:** list endpoints paged and indexed; overview under 1 s on a warm Neon.
+- **UAT-3. Monitoring:** daily sync health, failed-job and unknown-status alerts (proposal §16).
+- **UAT-4. UAT:** scripted scenarios per module with the client's team; fixes; training and short
   how-to guides per role.
-- **H5. Full go-live:** switch Neon to always-on from month 5 as budgeted; final 30% milestone.
+- **UAT-5. Full go-live:** Neon always-on from month 5 as budgeted; final 30% milestone.
 
 ---
 
-## 3. Client inputs this plan waits on
+## 4. Client inputs this plan waits on
 
-From proposal §11, mapped to the step that is incomplete without them. None of them block the
-ledgers (1.10).
+From proposal §11. None of them block ingest (1.10); each leaves a flagged gap until it arrives.
 
 | Input | Needed by |
 | --- | --- |
-| Product cost prices with dates | E7 (COGS and profit stay pending until then) |
-| Full order CSV per store; `read_all_orders` request | G7 |
-| PostEx portal access or last two statements | G7 check |
-| Earlier PostEx account token, if any | G7 |
-| Juggun's Organics SKUs | E2 |
-| Team members, emails, roles | A3, R1 |
-| Business WhatsApp number(s) and message wording | D3 |
-| Opening stock count | E7 (warehouse quants flagged negative until then) |
-| Retail partner list with stock held | E1, E5 |
-| Vendor list and open POs | E6 |
-| Influencer list and discount codes | F3, F5 |
-| Opening balances and expense categories | G2, G5 |
+| Product cost prices with dates | PUR-4, ACC-2 (COGS and profit stay pending) |
+| Full order CSV per store; `read_all_orders` request | ACC-7 |
+| PostEx portal access or last two statements | ACC-8 |
+| Earlier PostEx account token, if any | ACC-7 |
+| Juggun's Organics SKUs | ORD-1 (listed as unmapped until then) |
+| Team members, emails, roles | FND-3, R1 |
+| Business WhatsApp number(s) and message wording | CNF-3 |
+| Opening stock count | INV-3 (quants flagged negative until then) |
+| Retail partner list with stock held | INV-5 |
+| Vendor list and open POs | PUR-1 |
+| Influencer list and discount codes | PR-1, PR-3 |
+| Opening balances and expense categories | ACC-3, ACC-5 |
 
 ---
 
-## 4. Risks and decisions
+## 5. Risks
 
-- **R1. PostEx has no test environment.** Mitigated by read-only client, recorded fixtures, and
+- **R1. PostEx has no test environment.** Read-only client, recorded fixtures,
   `POSTEX_ALLOW_WRITES` refused outside production. Booking stays out of scope.
 - **R2. PostEx field and status drift.** Labels already differ between endpoints. We key on
-  history codes, keep raw payloads, and send unknown codes to the queue instead of guessing.
-- **R3. Neon scale-to-zero vs polling.** The months 1–4 budget assumes ~8 active DB hours a day.
-  A 10-minute poll wakes Neon all day. Decision: poll PostEx every 10–30 minutes between
-  08:00 and 23:00 Karachi, hourly overnight; webhooks still wake the DB when orders arrive. Measure
-  active hours in week 2 and report before month 5.
-- **R4. Shopify 60-day window.** Older orders depend on CSV exports or `read_all_orders`
-  approval; history import (G7) is built to run from either.
-- **R5. Protected customer data.** Name, phone, address need Shopify's protected data access,
-  already switched on for both apps. Any new scope (`write_orders`, `write_inventory`) is added
-  only when its feature is turned on.
-- **R6. Matching below 95%.** Manual bookings with non-Shopify references go to suggested/unmatched,
-  never auto-linked on weak evidence.
-- **R7. Ledgers before their inputs.** Posting from week 1 means COGS and warehouse stock are
-  incomplete until costs and opening counts arrive. Handled by `cost_missing` and
-  `negative_stock` review items and dated catch-up postings, so nothing is back-edited. If the
-  opening count is taken on a different day than the one loaded, the difference shows as an
-  adjustment, which is the honest record.
-- **R8. Four weeks is tight for eight modules.** Release 1 scope is fixed (B, C, D). If week 3
-  slips, the cut order is: E7 write-back, G4 bank matching, F5 reports — all already optional
-  or reportable later without changing the ledgers.
+  history codes, keep raw payloads, and send unknown codes to reconciliation.
+- **R3. Neon scale-to-zero vs polling.** The months 1–4 budget assumes ~8 active DB hours a day;
+  a 10-minute poll wakes Neon all day. Poll PostEx every 10–30 minutes 08:00–23:00 Karachi and
+  hourly overnight; webhooks still wake it for new orders. Measure active hours in week 2.
+- **R4. Shopify 60-day window.** Older orders depend on CSV exports or `read_all_orders`;
+  ACC-7 runs from either.
+- **R5. Protected customer data.** Already on for both apps. New scopes (`write_orders`,
+  `write_inventory`) only when their feature is switched on.
+- **R6. Matching below 95%.** Manual bookings go to suggested/unmatched, never auto-linked on weak
+  evidence.
+- **R7. Ledgers filled late.** Stock (week 3) and journal (weeks 3–4) are built by replay, so the
+  replay path is exercised on every deploy to a Neon branch before main, and the *Delivered COD*
+  vs journal check in ACC-2 is the gate.
+- **R8. Four weeks for eight modules.** Release 1 scope is fixed (FND, ORD, SHP, CNF). If week 3
+  slips, the cut order is INV-6 write-back, ACC-4 bank matching, PR-3 reports — each optional or
+  reportable later without changing the ledgers.
