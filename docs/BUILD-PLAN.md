@@ -287,8 +287,9 @@ is built (**applied**) or needs a decision (**decide**).
   (rules), `routes.ts` (HTTP, zod-validated). Integrations stay in `src/integrations/`.
   `src/lib/money.ts` (1.1) and `src/lib/time.ts` (1.2) are the only places amounts and PostEx
   timestamps are parsed.
-- Tests: Vitest. Integration tests run against a Neon branch (`DATABASE_URL_TEST`), never main.
-  PostEx and Shopify tests use **recorded real responses** in `test/fixtures/`.
+- Tests: `node:test` (run through `tsx`). Integration tests run against a Neon branch
+  (`DATABASE_URL_TEST`), never main. PostEx and Shopify tests use **recorded real responses** in
+  `test/fixtures/`, with customer names, phones and addresses masked before they are committed.
 - Frontend: React Router, TanStack Query, Recharts. One query hook per endpoint in
   `src/lib/queries/`.
 - Every step ends with `npm run typecheck` and `npm test` (backend), and `npm run build` and

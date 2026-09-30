@@ -71,4 +71,4 @@ src/
 ## Next steps
 
 The step-by-step plan for all eight modules, with a "done when" for each step, is in
-[`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md).
+[`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
