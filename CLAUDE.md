@@ -69,3 +69,23 @@ read_locations, read_returns. Orders API returns the last 60 days by default.
 `docs/BUILD-PLAN.md` — the schema, the design decisions and why they are what they are.
 Follow it. If you believe a decision in it is wrong, say so in the PR description and
 implement it as written anyway.
+
+## Definition of done
+
+A task is done when ALL of these hold:
+
+1. `npm run typecheck` passes with zero errors.
+2. `npm run build` succeeds.
+3. `npm test` passes, and the task's own new tests are among them.
+4. The task's stated acceptance criteria each have a test or a command proving them.
+5. Nothing outside the stated scope was modified. No dependency added unless the brief
+   allows it. No reformatting of untouched files.
+6. No secret, token, real customer name, real phone number or real address appears in any
+   committed file, including fixtures and test snapshots.
+7. New code matches the surrounding style: same comment density, same naming, same error
+   handling shape. Comments explain why, not what.
+8. The PR description states: what changed, which acceptance criteria are proven and how,
+   any assumption made, and anything found-but-not-fixed.
+
+If you cannot satisfy a criterion, STOP and say so plainly in the PR description. A partial
+PR that is honest about the gap is worth more than a complete-looking one that is not.
