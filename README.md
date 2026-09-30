@@ -70,7 +70,5 @@ src/
 
 ## Next steps
 
-1. Install the Shopify app on each store, then `npm run verify` should report both.
-2. Database schema and migrations (orders, shipments, stock ledger, financial events).
-3. Shopify sync: webhooks with HMAC verification, plus the 15-minute catch-up poll.
-4. PostEx polling worker and the reconciliation job.
+The step-by-step plan for all eight modules, with a "done when" for each step, is in
+[`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md).
