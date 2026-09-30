@@ -46,6 +46,7 @@ src/
   app.ts                    Express app: helmet, CORS, JSON, request logging, routes
   config.ts                 environment loading and validation (zod)
   logger.ts                 pino, with credentials redacted
+  lib/                      money (paisa), Karachi time, phone normalisation
   db.ts                     Neon connection, health check
   http/routes/              health, integrations status
   http/middleware/errors.ts 404 and error handling
