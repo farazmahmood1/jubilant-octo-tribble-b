@@ -29,8 +29,10 @@ Note `erasableSyntaxOnly` is on: no constructor parameter properties, no enums.
 4. Timestamps are `timestamptz` stored UTC. All business-day logic uses Asia/Karachi via the
    shared helper. PostEx returns offset-less local strings: parse as Asia/Karachi explicitly.
 5. Every sync is idempotent, keyed on the external id. Running it twice must change nothing.
-6. Stock only ever changes through `stock_moves`. Money only ever changes through
-   `journal_lines`. No incrementing quantity columns, no ad-hoc balance updates.
+6. Stock balances only ever change through `stock_moves`. Money balances only ever change
+   through `journal_lines`. Source records such as `shipment_charges` and `cod_payouts` are
+   written by their sync as usual; balances are never. No incrementing quantity columns, no
+   ad-hoc balance updates.
 7. Derived state is derived on every read/change. No hand-set status columns.
 8. Every financial or destructive action writes to `audit_log` with the actor.
 9. Multi-tenant from day one: no Shopify id without a `store_id`, no shipment without a
@@ -54,7 +56,8 @@ initiated, 0006 returned at merchant warehouse, 0002 cancelled by merchant.
 
 Measured on live data (1,073 parcels, 14 May – 19 Sep 2026): 877 delivered, 117 returned
 (11.8%), forward charges PKR 209,009, return charges PKR 27,787, 95.4% of parcels carry the
-Shopify order number, 54 parcels with zero COD (PR packages).
+Shopify order number, 54 parcels with zero COD (PR packages, gifts or replacements; each is
+classified by a person, never assumed to be PR).
 
 ## Shopify facts
 

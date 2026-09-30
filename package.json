@@ -5,11 +5,11 @@
   "description": "Order, returns, inventory and profit platform for NUR Organics — Shopify + PostEx backend",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "verify": "tsx src/scripts/verify.ts",
     "typecheck": "tsc --noEmit",
