@@ -1,0 +1,19 @@
+node_modules
+dist
+
+# Secrets — never commit. .env.example is the template and IS committed.
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+.gstack/
