@@ -20,6 +20,9 @@ npm run verify           # read-only connection check for Neon, Shopify and Post
 | `npm run typecheck` | TypeScript, no emit |
 | `npm run verify` | Checks every configured integration, read-only |
 | `npm test` / `npm run test:watch` | `node:test` over `src/**/*.test.ts`, once or on change |
+| `npm run migrate` | Applies pending migrations from `src/db/migrations/`; refuses if an applied file changed |
+| `npm run migrate:status` | Applied, pending, changed or missing, per migration; exits 1 on changed or missing |
+| `npm run seed` | Upserts `stores` and `postex_accounts` from config; safe to repeat |
 
 ## Configuration
 
@@ -47,7 +50,8 @@ src/
   config.ts                 environment loading and validation (zod)
   logger.ts                 pino, with credentials redacted
   lib/                      money (paisa), Karachi time, phone normalisation
-  db.ts                     Neon connection, health check
+  db.ts                     Neon connection (TLS required except on localhost), health check
+  db/                       migration runner, migrations/NNNN_name.sql, seed from config
   http/routes/              health, integrations status
   http/middleware/errors.ts 404 and error handling
   integrations/postex/      read-only PostEx client + verified response types
@@ -60,6 +64,15 @@ src/
 
 Tests sit next to the code as `*.test.ts` and run with `node:test` through `tsx`, so there is no
 build step and no test framework dependency.
+
+Database tests run only when `DATABASE_URL_TEST` points at a scratch Postgres, and are skipped
+otherwise. Each test gets its own schema, dropped afterwards. Never point it at Neon; the helper
+refuses a `*.neon.tech` host.
+
+```bash
+docker run --rm -d -e POSTGRES_PASSWORD=x -p 5433:5432 postgres:17
+DATABASE_URL_TEST=postgres://postgres:x@localhost:5433/postgres npm test
+```
 
 Fixtures in `src/test/fixtures/` are **recorded real responses**, because PostEx has no sandbox
 and its field names differ from its own documentation. Two rules:

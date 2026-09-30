@@ -14,7 +14,10 @@
     "verify": "tsx src/scripts/verify.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "test:watch": "node --import tsx --test --watch 'src/**/*.test.ts'"
+    "test:watch": "node --import tsx --test --watch 'src/**/*.test.ts'",
+    "migrate": "tsx src/scripts/migrate.ts",
+    "migrate:status": "tsx src/scripts/migrate.ts status",
+    "seed": "tsx src/scripts/migrate.ts seed"
   },
   "dependencies": {
     "cors": "^2.8.5",

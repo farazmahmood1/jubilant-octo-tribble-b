@@ -17,10 +17,22 @@ export const db = (): Sql | undefined => {
     max: 10,
     idle_timeout: 30,
     connect_timeout: 15,
-    ssl: 'require',
+    ...sslOptions(config.databaseUrl),
     onnotice: (notice) => logger.debug({ notice }, 'postgres notice'),
   });
   return client;
+};
+
+/**
+ * Neon only accepts TLS, so it is required by default. A local scratch database (the one tests
+ * and migrations are tried against) has no certificate, and a URL that names its own `sslmode`
+ * is left to decide. postgres.js lets an explicit `ssl` option override the URL, so the key is
+ * omitted entirely in that case rather than set to undefined.
+ */
+export const sslOptions = (databaseUrl: string): { ssl?: 'require' | false } => {
+  const url = new URL(databaseUrl);
+  if (url.searchParams.has('sslmode')) return {};
+  return { ssl: ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? false : 'require' };
 };
 
 export type DbHealth = { status: 'ok' | 'error' | 'not_configured'; latencyMs?: number; error?: string };
