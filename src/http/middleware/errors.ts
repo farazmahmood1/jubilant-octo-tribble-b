@@ -8,6 +8,8 @@ export class HttpError extends Error {
     readonly status: number,
     message: string,
     readonly details?: unknown,
+    /** A stable word the dashboard can act on (`totp_required`, `forbidden`), beside the human message. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'HttpError';
@@ -30,6 +32,7 @@ export const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
     error: {
       message: status >= 500 && config.isProduction ? 'Internal server error' : message,
       ...(error instanceof HttpError && error.details ? { details: error.details } : {}),
+      ...(error instanceof HttpError && error.code ? { code: error.code } : {}),
     },
   });
 };

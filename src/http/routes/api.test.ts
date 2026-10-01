@@ -7,6 +7,7 @@ import { createApp } from '../../app.js';
 import { createSessionToken } from '../../auth/session.js';
 import { config } from '../../config.js';
 import { openReviewItem } from '../../db/repos/review.js';
+import { matchUnmatched } from '../../jobs/postex-match.js';
 import { locationId, reconcileShipmentStock } from '../../domain/stock.js';
 import { skipWithoutDb } from '../../test/db.js';
 import { orderWithLines, parcel, variantsIn } from '../../test/inventory.js';
@@ -126,6 +127,197 @@ describe('API: reconciliation queue, stock and settings', { skip: skipWithoutDb 
     const [item] = await s.schema.sql`select status from reconciliation_items where id = ${itemId}`;
     assert.equal(item?.['status'], 'open');
     assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderNumber: '#999999' })).status, 404);
+  });
+
+  it('unlinks a wrong link: stock back, sale reversed, order ruled out, parcel back in the queue, audited', async () => {
+    const { shipmentId, itemId } = await unmatchedItem('#4006');
+    const orderId = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#4006', placedAt: new Date('2026-09-01T05:00:00Z'), lines: [{ variantId: variant, qty: 2 }] });
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderId })).status, 200);
+
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/unlink`, {})).status, 400, 'a note is required');
+    const { status, body } = await call('POST', `/reconciliation/items/${itemId}/unlink`, { note: 'Wrong customer' });
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.deepEqual([body['orderNumber'], body['stockMoves']], ['#4006', 1]);
+    assert.equal((body['postingActions'] as Record<string, string>)['sale'], 'reversed');
+
+    const [shipment] = await s.schema.sql`select order_id, match_method, stock_pending, ruled_out_order_ids from shipments where id = ${shipmentId}`;
+    assert.deepEqual([shipment?.['order_id'], shipment?.['match_method'], shipment?.['stock_pending']], [null, null, true]);
+    assert.deepEqual(shipment?.['ruled_out_order_ids'], [orderId]);
+
+    // Every unit the parcel took out came back: its own moves net to nothing at every location.
+    const held = await s.schema.sql<{ qty: number }[]>`
+      select sum(qty)::int as qty from (
+        select from_location_id as l, -qty as qty from stock_moves where shipment_id = ${shipmentId}
+        union all select to_location_id, qty from stock_moves where shipment_id = ${shipmentId}
+      ) legs group by l having sum(qty) <> 0
+    `;
+    assert.equal(held.length, 0);
+
+    const [order] = await s.schema.sql`select state from orders where id = ${orderId}`;
+    assert.notEqual(order?.['state'], 'delivered', 'the order is no longer delivered by this parcel');
+    const [open] = await s.schema.sql`select detail->>'reason' as reason from reconciliation_items where shipment_id = ${shipmentId} and kind = 'unmatched_shipment' and status = 'open'`;
+    assert.equal(open?.['reason'], 'unlinked_by_hand');
+    const [audit] = await s.schema.sql`select after->>'note' as note from audit_log where action = 'shipment.unlink' and entity_id = ${shipmentId}`;
+    assert.equal(audit?.['note'], 'Wrong customer');
+
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/unlink`, { note: 'again' })).status, 409, 'no longer linked');
+  });
+
+  it('the matcher does not pick again the order a person unlinked a parcel from', async () => {
+    const { shipmentId, itemId } = await unmatchedItem('#4007');
+    const orderId = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#4007', placedAt: new Date('2026-09-01T05:00:00Z'), lines: [{ variantId: variant, qty: 1 }] });
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderId })).status, 200);
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/unlink`, { note: 'Wrong order' })).status, 200);
+
+    // The parcel's label still says #4007, which would match this order by number; it must not.
+    const counts = { matched: 0, suggested: 0, unmatched: 0 };
+    await matchUnmatched(s.schema.sql, { id: accountId, key: 'nur' }, counts);
+    const [after] = await s.schema.sql`select order_id from shipments where id = ${shipmentId}`;
+    assert.equal(after?.['order_id'], null);
+
+    // A person can still choose it again by hand.
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderId })).status, 200);
+  });
+
+  it('lists the moves of one product, newest first, with where they went and which parcel caused them', async () => {
+    const { shipmentId, itemId } = await unmatchedItem('#4009');
+    const orderId = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#4009', placedAt: new Date('2026-09-01T05:00:00Z'), lines: [{ variantId: variant, qty: 3 }] });
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderId })).status, 200);
+
+    const { status, body } = await call('GET', `/stock/variants/${variant}/moves?limit=2`);
+    assert.equal(status, 200);
+    const moves = body['moves'] as Array<{ id: string; qty: number; to: { kind: string }; shipmentId: string | null; trackingNumber: string | null }>;
+    assert.equal(moves.length, 2);
+    assert.equal(moves[0]?.to.kind, 'customer', 'newest first: the delivery');
+    assert.equal(moves[0]?.shipmentId, shipmentId);
+    assert.ok(moves[0]?.trackingNumber);
+    assert.ok(body['nextBefore'], 'a full page says there may be more');
+
+    const older = await call('GET', `/stock/variants/${variant}/moves?limit=200&before=${moves[1]!.id}`);
+    assert.ok((older.body['moves'] as Array<{ id: string }>).every((m) => Number(m.id) < Number(moves[1]!.id)));
+    assert.equal((await call('GET', '/stock/variants/999999999/moves')).status, 404);
+    assert.equal((await call('GET', `/stock/variants/${variant}/moves?limit=0`)).status, 400);
+  });
+
+  it('pages an account\'s ledger on the server with a running balance that carries across pages', async () => {
+    const first = await call('GET', '/reports/lines?account=1100&size=1&page=1');
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const total = first.body['total'] as number;
+    assert.ok(total >= 1, 'earlier tests posted to the COD receivable account');
+
+    // Walk every page of one line: the balance after each line is the one before it plus its own movement.
+    let expected = BigInt(first.body['opening'] as string);
+    const seen: string[] = [];
+    for (let page = 1; page <= total; page++) {
+      const body = page === 1 ? first.body : (await call('GET', `/reports/lines?account=1100&size=1&page=${page}`)).body;
+      const [line] = body['lines'] as Array<{ lineId: string; debit: string; credit: string; balance: string }>;
+      expected += BigInt(line!.debit) - BigInt(line!.credit);
+      assert.equal(line!.balance, expected.toString(), `page ${page}`);
+      seen.push(line!.lineId);
+    }
+    assert.equal(new Set(seen).size, total, 'no line on two pages, none missed');
+    // The totals are over the whole filter, and the last balance is the closing one.
+    assert.equal(BigInt(first.body['opening'] as string) + BigInt(first.body['debit'] as string) - BigInt(first.body['credit'] as string), expected);
+    assert.equal(first.body['closing'], expected.toString());
+
+    // A page of many gives the same lines in the same order.
+    const wide = await call('GET', '/reports/lines?account=1100&size=200');
+    assert.deepEqual((wide.body['lines'] as Array<{ lineId: string }>).slice(0, seen.length).map((l) => l.lineId), seen.slice(0, 200));
+  });
+
+  it('opens one whole journal entry, balanced, from a line of a report', async () => {
+    const { body } = await call('GET', '/reports/lines?account=1100&size=1');
+    const [line] = body['lines'] as Array<{ entryId: string }>;
+    const { status, body: entryBody } = await call('GET', `/accounting/entries/${line!.entryId}`);
+    assert.equal(status, 200);
+    const entry = entryBody['entry'] as { lines: Array<{ debit: string; credit: string }>; sourceType: string; periodClosedAt: string | null };
+    assert.ok(entry.lines.length >= 2);
+    assert.equal(
+      entry.lines.reduce((n, l) => n + BigInt(l.debit), 0n),
+      entry.lines.reduce((n, l) => n + BigInt(l.credit), 0n),
+      'debits equal credits',
+    );
+    assert.ok(entry.sourceType);
+    assert.equal(entry.periodClosedAt, null, 'the month is open');
+    assert.equal((await call('GET', '/accounting/entries/999999999')).status, 404);
+  });
+
+  it('narrows lines to one month, and refuses a month that does not exist', async () => {
+    assert.equal((await call('GET', '/reports/lines?account=1100&month=2026-13')).status, 400);
+    const sept = await call('GET', '/reports/lines?month=2026-09&size=200');
+    assert.equal(sept.status, 200);
+    assert.ok((sept.body['lines'] as Array<{ date: string }>).every((l) => l.date >= '2026-09-01' && l.date <= '2026-09-30'));
+  });
+
+  it('serves the dashboard figures and the return rate by city and by month from the reports', async () => {
+    const { status, body } = await call('GET', '/reports/dashboard?from=2026-01-01&to=2026-12-31');
+    assert.equal(status, 200, JSON.stringify(body));
+    for (const key of ['period', 'deliveredRevenue', 'profit', 'returnRate', 'deliverySuccess', 'cash', 'profitPerParcel']) assert.ok(key in body, key);
+    // Money travels as paisa strings, never numbers.
+    assert.equal(typeof (body['deliveredRevenue'] as Record<string, unknown>)['total'], 'string');
+    assert.equal(typeof (body['profit'] as Record<string, unknown>)['netProfit'], 'string');
+    assert.equal((body['cash'] as { asOf: string }).asOf, '2026-12-31');
+    // The profit tile is the P&L's own bottom line.
+    const pnl = await call('GET', '/reports/pnl?from=2026-01-01&to=2026-12-31');
+    assert.equal((body['profit'] as { netProfit: string }).netProfit, pnl.body['netProfit']);
+    // And revenue ties to the Sales revenue account's lines.
+    const lines = await call('GET', '/reports/lines?account=4000&from=2026-01-01&to=2026-12-31&size=1');
+    assert.equal(BigInt(lines.body['credit'] as string) - BigInt(lines.body['debit'] as string), BigInt((body['deliveredRevenue'] as { total: string }).total));
+
+    for (const by of ['city', 'month']) {
+      const r = await call('GET', `/reports/return-rate?by=${by}`);
+      assert.equal(r.status, 200, by);
+      for (const row of r.body['rows'] as Array<{ delivered: number; returned: number; of: number; rate: number }>) {
+        assert.equal(row.of, row.delivered + row.returned);
+        assert.ok(row.rate >= 0 && row.rate <= 1);
+      }
+    }
+    assert.equal((await call('GET', '/reports/return-rate?by=colour')).status, 400);
+    assert.equal((await call('GET', '/reports/dashboard?from=2026-02-30')).status, 400);
+  });
+
+  it('reads the alert thresholds with their defaults, saves a change, audits it, and refuses nonsense', async () => {
+    const before = await call('GET', '/settings/alerts');
+    assert.equal(before.status, 200);
+    assert.deepEqual(before.body['alerts'], { stuckDays: 7, confirmedNotBookedHours: 24, confirmedLookbackDays: 30 });
+
+    const saved = await call('PUT', '/settings/alerts', { stuckDays: 10, confirmedNotBookedHours: 48, confirmedLookbackDays: 60 });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.deepEqual((await call('GET', '/settings/alerts')).body['alerts'], { stuckDays: 10, confirmedNotBookedHours: 48, confirmedLookbackDays: 60 });
+    const [audit] = await s.schema.sql`select after->>'stuckDays' as days from audit_log where action = 'settings.update' and entity_id = 'alerts' order by id desc limit 1`;
+    assert.equal(audit?.['days'], '10');
+
+    for (const bad of [{ stuckDays: 0, confirmedNotBookedHours: 24, confirmedLookbackDays: 30 }, { stuckDays: 7.5, confirmedNotBookedHours: 24, confirmedLookbackDays: 30 }, { stuckDays: 7 }]) {
+      assert.equal((await call('PUT', '/settings/alerts', bad)).status, 400, JSON.stringify(bad));
+    }
+    // Put it back, so the order of tests does not matter.
+    await call('PUT', '/settings/alerts', { stuckDays: 7, confirmedNotBookedHours: 24, confirmedLookbackDays: 30 });
+  });
+
+  it('lists invoices and payments a page at a time', async () => {
+    for (const path of ['/accounting/invoices?size=5', '/accounting/payments?size=5', '/accounting/payments?direction=out']) {
+      const { status, body } = await call('GET', path);
+      assert.equal(status, 200, path);
+      assert.equal(typeof body['total'], 'number');
+      assert.ok(Array.isArray(body['rows']));
+    }
+    assert.equal((await call('GET', '/accounting/payments?size=0')).status, 400);
+  });
+
+  it('refuses to unlink a parcel that was checked in, and changes nothing', async () => {
+    const { shipmentId, itemId } = await unmatchedItem('#4008');
+    const orderId = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#4008', placedAt: new Date('2026-09-01T05:00:00Z'), lines: [{ variantId: variant, qty: 1 }] });
+    // Through the API, which also creates the signed-in user the check-in is attributed to.
+    assert.equal((await call('POST', `/reconciliation/items/${itemId}/link`, { orderId })).status, 200);
+    const [user] = await s.schema.sql<{ id: string }[]>`select id from users where email = ${config.auth.email}`;
+    await s.schema.sql`insert into return_check_ins (shipment_id, outcome, actor_id) values (${shipmentId}, 'restocked', ${user!.id})`;
+
+    const { status } = await call('POST', `/reconciliation/items/${itemId}/unlink`, { note: 'Wrong order' });
+    assert.equal(status, 409);
+    const [shipment] = await s.schema.sql`select order_id from shipments where id = ${shipmentId}`;
+    assert.equal(shipment?.['order_id'], orderId);
+    const [audit] = await s.schema.sql`select count(*)::int as n from audit_log where action = 'shipment.unlink' and entity_id = ${shipmentId}`;
+    assert.equal(audit?.['n'], 0, 'the audit row rolled back with the refusal');
   });
 
   it('returns alert, check-in, quants and an adjustment through the stock routes', async () => {

@@ -115,6 +115,8 @@ export const config = {
     password: values.AUTH_PASSWORD,
     // Without a fixed secret, sessions simply end when the server restarts.
     secret: values.AUTH_SECRET ?? randomBytes(32).toString('hex'),
+    // Also keys the sealing of authenticator secrets: without a fixed one they cannot be read again after a restart.
+    secretIsFixed: Boolean(values.AUTH_SECRET),
     sessionHours: values.AUTH_SESSION_HOURS,
     usingDefaults: !clean(env.AUTH_EMAIL) || !clean(env.AUTH_PASSWORD),
   },

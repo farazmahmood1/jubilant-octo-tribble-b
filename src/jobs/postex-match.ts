@@ -92,17 +92,23 @@ export const matchUnmatched = async (
   const refPrefixes = (acct?.store_key && config.refPrefixes?.[acct.store_key]) || [];
 
   const parcels = await sql<
-    { id: string; tracking_number: string; order_ref_number: string | null; cod: string | null; city: string | null; customer_phone: string | null; booked_at: Date | null }[]
+    {
+      id: string; tracking_number: string; order_ref_number: string | null; cod: string | null; city: string | null; customer_phone: string | null;
+      booked_at: Date | null; ruled_out_order_ids: string[];
+    }[]
   >`
-    select id, tracking_number, order_ref_number, cod_amount_paisa::text as cod, city, customer_phone, booked_at
+    select id, tracking_number, order_ref_number, cod_amount_paisa::text as cod, city, customer_phone, booked_at, ruled_out_order_ids
     from shipments where postex_account_id = ${account.id} and order_id is null
     order by id
   `;
 
   const linked: string[] = [];
   for (const parcel of parcels) {
+    // An order a person unlinked this parcel from is not offered again: it was the wrong one.
     const candidates = storeId
-      ? await candidatesFor(sql, storeId, { orderRef: parcel.order_ref_number, bookedAt: parcel.booked_at, trackingNumber: parcel.tracking_number }, windowDays)
+      ? (await candidatesFor(sql, storeId, { orderRef: parcel.order_ref_number, bookedAt: parcel.booked_at, trackingNumber: parcel.tracking_number }, windowDays)).filter(
+          (c) => !parcel.ruled_out_order_ids.includes(c.id),
+        )
       : [];
     const explanation = explainMatch(
       {

@@ -17,6 +17,8 @@ import { ID, parse } from '../validate.js';
  */
 
 const shipmentParams = z.object({ shipmentId: z.string().regex(ID) });
+const variantParams = z.object({ variantId: z.string().regex(ID) });
+const movesQuery = z.object({ before: z.string().regex(ID).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) });
 const checkIn = z.object({ outcome: z.enum(['restocked', 'damaged']), note: z.string().trim().max(2000).optional() });
 const quantsQuery = z.object({
   location: z.string().regex(/^[a-z_]+$/).optional(),
@@ -55,9 +57,10 @@ const asHttp = (error: unknown): never => {
 export const stockRouter = (getSql: SqlProvider): Router => {
   const router = Router();
 
-  router.get('/stock/returns-awaiting', async (_req, res) => {
+  router.get('/stock/returns-awaiting', async (req, res) => {
     const sql = requireSql(getSql);
-    res.json({ returns: await returnsAwaitingCheckIn(sql) });
+    const { store } = parse(storeQuery, req.query);
+    res.json({ returns: await returnsAwaitingCheckIn(sql, store) });
   });
 
   router.post('/stock/returns/:shipmentId/check-in', async (req, res) => {
@@ -99,6 +102,53 @@ export const stockRouter = (getSql: SqlProvider): Router => {
       limit 1000
     `;
     res.json({ quants: [...rows] });
+  });
+
+  /**
+   * Every move of one product, newest recorded first: where it came from and went, why, and who or
+   * which parcel caused it. Read-only; the ledger is only ever written through its functions.
+   */
+  router.get('/stock/variants/:variantId/moves', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { variantId } = parse(variantParams, req.params);
+    const { before, limit } = parse(movesQuery, req.query);
+    const [variant] = await sql`select 1 from variants where id = ${variantId}`;
+    if (!variant) throw new HttpError(404, `Product ${variantId} not found`);
+    const rows = await sql<
+      {
+        id: string; qty: number; reason: string; ref_type: string; ref_id: string; shipment_id: string | null; tracking_number: string | null;
+        actor: string | null; occurred_at: Date; note: string | null; from_key: string | null; from_kind: string; from_label: string;
+        to_key: string | null; to_kind: string; to_label: string;
+      }[]
+    >`
+      select m.id, m.qty, m.reason, m.ref_type, m.ref_id, m.shipment_id, s.tracking_number, u.name as actor, m.occurred_at, m.note,
+             lf.key as from_key, lf.kind as from_kind, lf.label as from_label, lt.key as to_key, lt.kind as to_kind, lt.label as to_label
+      from stock_moves m
+      join locations lf on lf.id = m.from_location_id
+      join locations lt on lt.id = m.to_location_id
+      left join shipments s on s.id = m.shipment_id
+      left join users u on u.id = m.actor_id
+      where m.variant_id = ${variantId} ${before ? sql`and m.id < ${before}` : sql``}
+      order by m.id desc
+      limit ${limit}
+    `;
+    res.json({
+      moves: rows.map((r) => ({
+        id: r.id,
+        qty: r.qty,
+        from: { key: r.from_key, kind: r.from_kind, label: r.from_label },
+        to: { key: r.to_key, kind: r.to_kind, label: r.to_label },
+        reason: r.reason,
+        refType: r.ref_type,
+        refId: r.ref_id,
+        shipmentId: r.shipment_id,
+        trackingNumber: r.tracking_number,
+        actor: r.actor,
+        occurredAt: r.occurred_at,
+        note: r.note,
+      })),
+      nextBefore: rows.length === limit ? (rows.at(-1)?.id ?? null) : null,
+    });
   });
 
   /** Variant search for the adjustment form. */

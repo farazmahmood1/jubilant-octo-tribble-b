@@ -109,6 +109,18 @@ describe('possible_duplicate_booking', () => {
     assert.deepEqual(finding?.detail['shipmentIds'], ['03', '09']);
   });
 
+  it('keeps each parcel id with its own tracking number, even when the two sort in opposite orders', () => {
+    // The parcel under test is id 03. Ids sort 03 < 05 < 11 while tracking numbers sort 01 < 03 < 99
+    // (ids 11, 03, 05): pairing by position would swap them.
+    const finding = duplicateBooking(
+      input('booked', { siblings: [{ id: '05', trackingNumber: '20000000000099', statusCode: null }, { id: '11', trackingNumber: '20000000000001', statusCode: '0008' }] }),
+    );
+    const parcels = finding?.detail['parcels'] as Array<{ id: string; trackingNumber: string }>;
+    assert.deepEqual(parcels.find((p) => p.id === '05'), { id: '05', trackingNumber: '20000000000099' });
+    assert.deepEqual(parcels.find((p) => p.id === '11'), { id: '11', trackingNumber: '20000000000001' });
+    assert.equal(parcels.length, 3, 'the parcel itself and both siblings');
+  });
+
   it('flags a second parcel booked after the first was delivered (a person decides whether it is a replacement)', () => {
     assert.ok(duplicateBooking(input('booked', { siblings: [{ id: '01', trackingNumber: '20000000000001', statusCode: '0005' }] })));
   });

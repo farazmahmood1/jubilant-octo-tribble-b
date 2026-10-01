@@ -173,6 +173,39 @@ export const targetFor = (state: OrderState, isPr: boolean): LocationKey => {
   }
 };
 
+/**
+ * A parcel was linked to the wrong order, so the units its moves carried are the wrong order's
+ * lines. Puts everything the parcel holds back in the warehouse, so a later link books the right
+ * order's lines from a clean start. Returns the number of moves written.
+ *
+ * `refId` must be unique to this unlink (its audit row), because a parcel can be linked and
+ * unlinked more than once and a repeated reference would be skipped as a replay. A parcel
+ * already checked in is refused: a person decided where those units went.
+ */
+export const returnParcelStockToWarehouse = async (db: Db, input: { shipmentId: string; refId: string; actorId: string; at: Date }): Promise<number> => {
+  const [checkIn] = await db`select 1 from return_check_ins where shipment_id = ${input.shipmentId}`;
+  if (checkIn) throw new StockError('This parcel has been checked in; its stock was placed by a person and is not undone by an unlink');
+  const warehouse = await locationId(db, 'warehouse');
+  let moves = 0;
+  for (const holding of await holdings(db, input.shipmentId)) {
+    if (holding.locationId === warehouse) continue;
+    const written = await recordMove(db, {
+      variantId: holding.variantId,
+      qty: holding.qty,
+      from: holding.locationId,
+      to: warehouse,
+      reason: 'unlink',
+      refType: 'shipment_unlink',
+      refId: input.refId,
+      shipmentId: input.shipmentId,
+      actorId: input.actorId,
+      occurredAt: input.at,
+    });
+    if (written) moves++;
+  }
+  return moves;
+};
+
 export interface ReconcileResult {
   shipmentId: string;
   orderId: string | null;
@@ -365,12 +398,13 @@ export interface AwaitingCheckIn {
  * nobody has checked it in. Unmatched parcels are included; the parcel is physically missing
  * whether or not its order is known. Oldest first.
  */
-export const returnsAwaitingCheckIn = async (db: Db): Promise<AwaitingCheckIn[]> => {
+export const returnsAwaitingCheckIn = async (db: Db, storeKey?: string): Promise<AwaitingCheckIn[]> => {
   const rows = await db<{ id: string; tracking_number: string; account: string; order_id: string | null; returned_at: Date | null }[]>`
     select s.id, s.tracking_number, a.key as account, s.order_id, s.status_updated_at as returned_at
     from shipments s
     join postex_accounts a on a.id = s.postex_account_id
     where s.status_code = '0006'
+      ${storeKey ? db`and a.store_id = (select id from stores where key = ${storeKey})` : db``}
       and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)
     order by s.status_updated_at nulls last, s.id
   `;

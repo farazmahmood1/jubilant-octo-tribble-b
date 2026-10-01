@@ -3,11 +3,28 @@ import { timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify } from 'jose';
 
 import { config } from '../config.js';
+import { type Role, isRole } from './permissions.js';
 
+/** Who a token says is signed in. The database, not the token, says what that person may do now. */
 export interface SessionUser {
   email: string;
   name: string;
-  role: 'owner';
+  role: Role;
+}
+
+/** A signed-in person as every request sees them, resolved from the database on each request. */
+export interface AuthUser extends SessionUser {
+  id: string;
+  /**
+   * Whether this session has met its second-factor requirement. False for an owner or manager who
+   * has not set up an authenticator app yet: such a session can reach nothing but the screens to set one up.
+   */
+  mfa: boolean;
+  totpEnabled: boolean;
+}
+
+export interface TokenClaims extends SessionUser {
+  mfa: boolean;
 }
 
 const secret = new TextEncoder().encode(config.auth.secret);
@@ -22,19 +39,21 @@ const equals = (a: string, b: string): boolean => {
 };
 
 /**
- * Checks the single set of credentials held in the environment.
- * Real accounts (users table, argon2 hashes, per-role permissions) replace this once the
- * database schema lands; the API shape stays the same.
+ * The bootstrap sign-in: the one account in the environment, for the very first start, before any
+ * real account has a password. `accounts.login` only consults it while no active owner has one;
+ * after that it is refused, whatever the environment says.
  */
-export const verifyCredentials = (email: string, password: string): SessionUser | undefined => {
-  const emailOk = equals(email.trim().toLowerCase(), config.auth.email);
-  const passwordOk = equals(password, config.auth.password);
-  if (!emailOk || !passwordOk) return undefined;
-  return { email: config.auth.email, name: 'NUR Organics', role: 'owner' };
-};
+export const matchesBootstrapCredentials = (email: string, password: string): boolean =>
+  equals(email.trim().toLowerCase(), config.auth.email) && equals(password, config.auth.password);
 
-export const createSessionToken = async (user: SessionUser): Promise<string> =>
-  new SignJWT({ name: user.name, role: user.role })
+export const BOOTSTRAP_NAME = 'NUR Organics';
+
+/**
+ * A signed session token. `mfa` is whether the second factor was satisfied when it was issued; a
+ * token made without saying so is a fully authenticated one (the sign-in route is what decides).
+ */
+export const createSessionToken = async (user: SessionUser, options: { mfa?: boolean } = {}): Promise<string> =>
+  new SignJWT({ name: user.name, role: user.role, mfa: options.mfa ?? true })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(user.email)
     .setIssuer(ISSUER)
@@ -42,11 +61,11 @@ export const createSessionToken = async (user: SessionUser): Promise<string> =>
     .setExpirationTime(`${config.auth.sessionHours}h`)
     .sign(secret);
 
-export const readSessionToken = async (token: string): Promise<SessionUser | undefined> => {
+export const readSessionToken = async (token: string): Promise<TokenClaims | undefined> => {
   try {
     const { payload } = await jwtVerify(token, secret, { issuer: ISSUER });
-    if (!payload.sub) return undefined;
-    return { email: payload.sub, name: String(payload.name ?? ''), role: 'owner' };
+    if (!payload.sub || !isRole(payload.role)) return undefined;
+    return { email: payload.sub, name: String(payload.name ?? ''), role: payload.role, mfa: payload.mfa !== false };
   } catch {
     return undefined;
   }

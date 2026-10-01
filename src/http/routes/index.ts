@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
 import type { SqlProvider } from '../middleware/database.js';
-import { requireAuth } from '../middleware/require-auth.js';
+import { authenticate, authorize, stripPii } from '../middleware/require-auth.js';
 import { accountingRouter } from './accounting.js';
 import { authRouter } from './auth.js';
 import { confirmationsRouter } from './confirmations.js';
@@ -17,17 +17,23 @@ import { reconciliationRouter } from './reconciliation.js';
 import { reportsRouter } from './reports.js';
 import { settingsRouter } from './settings.js';
 import { stockRouter } from './stock.js';
+import { usersRouter } from './users.js';
 
 export const createApiRouter = (getSql: SqlProvider): Router => {
   const apiRouter = Router();
 
-  // Public: sign-in and the health probes.
-  apiRouter.use(authRouter);
+  // Public: sign-in (and the signed-in person's own security, which checks its own session) and
+  // the health probes.
+  apiRouter.use(authRouter(getSql));
   apiRouter.use(healthRouter);
 
-  // Everything below needs a session.
-  apiRouter.use(requireAuth);
+  // Everything below needs a session, then a role that the permission table says may make the
+  // request, and returns no customer phone number to a role that may not see one.
+  apiRouter.use(authenticate(getSql));
+  apiRouter.use(authorize);
+  apiRouter.use(stripPii);
   apiRouter.use(integrationsRouter);
+  apiRouter.use(usersRouter(getSql));
   apiRouter.use(reconciliationRouter(getSql));
   apiRouter.use(stockRouter(getSql));
   apiRouter.use(settingsRouter(getSql));

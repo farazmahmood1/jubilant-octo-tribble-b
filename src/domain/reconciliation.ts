@@ -117,6 +117,11 @@ export const duplicateBooking = ({ parcel, order, siblings }: RuleInput): Findin
   const live = siblings.filter((s) => s.id !== parcel.id && !(s.statusCode !== null && SETTLED_AWAY.has(s.statusCode)));
   if (live.length === 0) return null;
   const all = [parcel.id, ...live.map((s) => s.id)].sort((a, b) => Number(a) - Number(b));
+  // Id and number travel together, because the two lists above are sorted differently and so
+  // cannot be paired by position.
+  const parcels = [{ id: parcel.id, trackingNumber: parcel.trackingNumber }, ...live.map((s) => ({ id: s.id, trackingNumber: s.trackingNumber }))].sort((a, b) =>
+    a.trackingNumber.localeCompare(b.trackingNumber),
+  );
   // One item per group, whichever parcel of it is evaluated.
   const group = order ? `order:${order.id}` : `ref:${parcel.accountKey}:${(parcel.orderRefNumber ?? '').trim().toUpperCase()}`;
   return {
@@ -128,6 +133,7 @@ export const duplicateBooking = ({ parcel, order, siblings }: RuleInput): Findin
       orderNumber: order?.orderNumber ?? parcel.orderRefNumber,
       shipmentIds: all,
       trackingNumbers: [parcel.trackingNumber, ...live.map((s) => s.trackingNumber)].sort(),
+      parcels,
     },
   };
 };

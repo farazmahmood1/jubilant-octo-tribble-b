@@ -183,10 +183,13 @@ export const listReviewItems = async (db: Db, filter: ReviewItemFilter): Promise
   }));
 };
 
-/** Open items per kind, for the queue's tabs. */
-export const countOpenByKind = async (db: Db): Promise<Record<string, number>> => {
+/** Open items per kind, for the queue's tabs and the dashboard; for one brand when `storeKey` is given. */
+export const countOpenByKind = async (db: Db, storeKey?: string): Promise<Record<string, number>> => {
   const rows = await db<{ kind: string; n: number }[]>`
-    select kind, count(*)::int as n from reconciliation_items where status = 'open' group by kind order by kind
+    select r.kind, count(*)::int as n from reconciliation_items r
+    ${storeKey ? db`join stores st on st.id = r.store_id` : db``}
+    where r.status = 'open' ${storeKey ? db`and st.key = ${storeKey}` : db``}
+    group by r.kind order by r.kind
   `;
   return Object.fromEntries(rows.map((r) => [r.kind, r.n]));
 };

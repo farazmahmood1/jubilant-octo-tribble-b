@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { actorId } from '../../auth/actor.js';
 import { matchReport } from '../../db/repos/match-report.js';
 import { ReviewItemNotOpenError, countOpenByKind, decideReviewItem, listReviewItems } from '../../db/repos/review.js';
-import { LinkError, linkShipmentToOrder } from '../../db/repos/shipment-links.js';
+import { LinkError, linkShipmentToOrder, unlinkShipmentFromOrder } from '../../db/repos/shipment-links.js';
 import { DEFAULT_WINDOW_DAYS } from '../../domain/matching.js';
 import { candidatesFor } from '../../jobs/postex-match.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
@@ -13,7 +13,7 @@ import { ID, parse } from '../validate.js';
 
 /**
  * The reconciliation queue (Step 9): list, resolve, ignore, and link a parcel to its order by
- * hand. Every decision is audited with the signed-in user. Responses carry order and tracking
+ * hand, or take a wrong link back out. Every decision is audited with the signed-in user. Responses carry order and tracking
  * numbers, never customer names, phones or addresses (rule 2).
  */
 
@@ -50,9 +50,10 @@ export const reconciliationRouter = (getSql: SqlProvider): Router => {
     res.json({ items, nextBefore: items.length === query.limit ? (items.at(-1)?.id ?? null) : null });
   });
 
-  router.get('/reconciliation/summary', async (_req, res) => {
+  router.get('/reconciliation/summary', async (req, res) => {
     const sql = requireSql(getSql);
-    const [open, matching] = await Promise.all([countOpenByKind(sql), matchReport(sql)]);
+    const { store } = parse(z.object({ store: z.enum(['nur', 'organics']).optional() }), req.query);
+    const [open, matching] = await Promise.all([countOpenByKind(sql, store), matchReport(sql)]);
     res.json({ open, matching });
   });
 
@@ -126,6 +127,25 @@ export const reconciliationRouter = (getSql: SqlProvider): Router => {
         ...(body.note ? { note: body.note } : {}),
       });
       res.json(result);
+    } catch (error) {
+      if (error instanceof LinkError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  });
+
+  /**
+   * The parcel is linked to the wrong order: take it back out. Needs a note, like every decision on
+   * the queue. The parcel returns to the queue as unmatched and the order is not offered for it again.
+   */
+  router.post('/reconciliation/items/:id/unlink', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { id } = parse(idParams, req.params);
+    const { note } = parse(decision, req.body);
+    const [item] = await sql<{ shipment_id: string | null }[]>`select shipment_id from reconciliation_items where id = ${id}`;
+    if (!item) throw new HttpError(404, `Review item ${id} not found`);
+    if (!item.shipment_id) throw new HttpError(409, 'This item is not about a single parcel; there is nothing to unlink');
+    try {
+      res.json(await unlinkShipmentFromOrder(sql, { shipmentId: item.shipment_id, actorId: await actorId(sql, sessionUser(req)), note }));
     } catch (error) {
       if (error instanceof LinkError) throw new HttpError(error.status, error.message);
       throw error;
