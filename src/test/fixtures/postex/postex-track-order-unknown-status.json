@@ -1,0 +1,25 @@
+{
+  "_fixture": "SYNTHETIC. Built from the field names verified in CLAUDE.md and src/integrations/postex/types.ts, not recorded. Replace with a masked recording of the same name.",
+  "statusCode": "200",
+  "statusMessage": "SUCCESSFULLY OPERATED",
+  "dist": {
+    "trackingNumber": "20000000000004",
+    "orderRefNumber": "#10004",
+    "transactionStatus": "Some New Status",
+    "transactionDate": "2026-09-10 11:00:00",
+    "orderDeliveryDate": "",
+    "statusUpdatedAt": "2026-09-12 08:30:00",
+    "invoicePayment": 1500,
+    "transactionFee": null,
+    "cityName": "Quetta",
+    "items": 1,
+    "invoiceDivision": 1,
+    "customerName": "[masked]",
+    "customerPhone": "[masked]",
+    "deliveryAddress": "[masked]",
+    "transactionStatusHistory": [
+      { "transactionStatusMessage": "Attempt Made: ICA(INCOMPLETE ADDRESS)", "transactionStatusMessageCode": "0013", "updatedAt": "2026-09-11 17:20:00" },
+      { "transactionStatusMessage": "Some New Status", "transactionStatusMessageCode": "0099", "updatedAt": "2026-09-12 08:30:00" }
+    ]
+  }
+}
