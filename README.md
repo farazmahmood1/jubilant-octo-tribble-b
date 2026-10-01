@@ -25,6 +25,7 @@ npm run verify           # read-only connection check for Neon, Shopify and Post
 | `npm run migrate:prod` | Same as `migrate`, from the compiled build, without `tsx` |
 | `npm run dev:worker` / `npm run start:worker` | Background worker (scheduler) from source with reload, or from `dist/` (Render worker) |
 | `npm run job -- <name>` | Runs one job once and exits: 0 succeeded, 1 failed, 2 unknown job, 3 already running elsewhere |
+| `npm run postex:totals -- <from> <to>` | PostEx parcels, delivered, returned and charges per account for a Karachi booking window |
 | `npm run seed` | Upserts `stores` and `postex_accounts` from config; safe to repeat |
 
 ## Configuration
@@ -95,6 +96,26 @@ The order cursor (`integration_cursors`, job `shopify:orders`) is the newest `up
 stored, saved after every page. A run that stops part-way resumes there; a second run re-reads
 only the last 10 minutes and inserts nothing. Skipped items are logged by order name or variant
 id only, never with customer data.
+
+## PostEx sync
+
+`npm run job -- postex:sync` (every 5 minutes on the worker) does two things per account,
+read-only (PostEx has no write call anywhere in this code):
+
+1. **Find new parcels.** `get-all-order` from the account's cursor (minus 3 days) to today, in
+   31-day chunks, at most every 15 minutes. The first run starts from 1 January 2026.
+2. **Refresh what is due**, 25 parcels per `track-bulk-order` call, by tier: new parcels now; out
+   for delivery or attempted every 5 minutes; other open parcels every 15 minutes; open parcels
+   booked over 30 days ago daily; delivered, returned or cancelled in the last 7 days daily (late
+   fee corrections); older terminal parcels never.
+
+History steps are inserted with the unique `(shipment, code, time)` key doing the dedupe, so a
+re-run adds no rows. A parcel's status, attempts and last failure reason are derived from all its
+stored steps, in event-time order. An unknown status code is reported once to the review queue.
+
+To reconcile after a sync: `npm run postex:totals -- 2026-05-14 2026-09-19` and compare with
+877 delivered, 117 returned, PKR 209,009 forward and PKR 27,787 return charges (fees and their
+16% tax are shown apart).
 
 ## Shopify webhooks
 

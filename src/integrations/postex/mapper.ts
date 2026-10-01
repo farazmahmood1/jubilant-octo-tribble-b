@@ -177,6 +177,10 @@ export const toShipmentEvents = (raw: unknown): ShipmentEvent[] => {
 
 const FAILURE_REASON = /\b(RFD|CNA|ICA|OPN)\b/;
 
+/** The reason on a `0013` attempt message: one of the four codes, else PostEx's own text. */
+export const failureReason = (message: string): FailureReason | string | null =>
+  (FAILURE_REASON.exec(message)?.[1] as FailureReason | undefined) ?? (message || null);
+
 export const toShipment = (raw: unknown): Shipment => {
   const parcel = unwrap(raw);
   const flags = new Set<ShipmentFlag>();
@@ -206,7 +210,7 @@ export const toShipment = (raw: unknown): Shipment => {
     items: typeof items === 'number' && Number.isInteger(items) ? items : null,
     attemptsCount: attempts.length,
     lastFailureReason: lastAttempt
-      ? ((FAILURE_REASON.exec(lastAttempt.message)?.[1] as FailureReason | undefined) ?? (lastAttempt.message || null))
+      ? failureReason(lastAttempt.message)
       : null,
     flags: [...flags].sort(),
   };

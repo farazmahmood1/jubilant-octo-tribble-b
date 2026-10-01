@@ -48,9 +48,9 @@ describe('schema', { skip: skipWithoutDb }, () => {
     assert.deepEqual(
       rows.map((r) => r['table_name']),
       [
-        'addresses', 'app_settings', 'audit_log', 'customers', 'integration_cursors', 'order_lines', 'order_state_log',
-        'orders', 'postex_accounts', 'product_costs', 'products', 'reconciliation_items', 'schema_migrations', 'stores', 'sync_runs', 'users',
-        'variants', 'webhook_events',
+        'addresses', 'app_settings', 'audit_log', 'cod_payouts', 'customers', 'integration_cursors', 'order_lines', 'order_state_log',
+        'orders', 'payout_lines', 'postex_accounts', 'product_costs', 'products', 'reconciliation_items', 'schema_migrations',
+        'shipment_charges', 'shipment_events', 'shipments', 'stores', 'sync_runs', 'users', 'variants', 'webhook_events',
       ],
     );
   });

@@ -1,3 +1,4 @@
+import { postexJob } from './postex.js';
 import type { JobDefinition } from './runner.js';
 import { shopifyJobs } from './shopify.js';
 import { catchupJob } from './shopify-catchup.js';
@@ -19,4 +20,5 @@ export const jobs: JobDefinition[] = [
   },
   ...shopifyJobs,
   catchupJob,
+  postexJob,
 ];

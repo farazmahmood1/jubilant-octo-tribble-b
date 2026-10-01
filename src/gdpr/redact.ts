@@ -7,9 +7,9 @@ import { normalizePk } from '../lib/phone.js';
  * GDPR redaction (Shopify's mandatory `customers/redact` and `shop/redact` webhooks).
  *
  * Personal data is scrubbed everywhere it is stored: the typed columns (name, phone, street
- * address, postcode) and the raw payloads kept for replay (`orders.raw`, `webhook_events.payload`),
- * which hold the same data in Shopify's own shape. Rows are not deleted: orders, their money and
- * their history stay, minus the person. City, province and country are kept; on their own they
+ * address, postcode, the parcel's phone) and the raw payloads kept for replay (`orders.raw`,
+ * `shipments.raw`, `webhook_events.payload`), which hold the same data in Shopify's and PostEx's
+ * own shapes. Rows are not deleted: orders, their money and their history stay, minus the person. City, province and country are kept; on their own they
  * identify nobody and the return-rate reports depend on them.
  *
  * Every redaction is one transaction and writes an `audit_log` row (CLAUDE.md rule 8).
@@ -18,13 +18,14 @@ import { normalizePk } from '../lib/phone.js';
 export interface RedactionResult {
   customers: number;
   orders: number;
+  shipments: number;
   webhookEvents: number;
 }
 
 type Scope = { customerIds: string[]; shopifyOrderIds: string[] } | 'all';
 
 /** Re-masks raw JSON in batches, so a whole shop's history is never held in memory at once. */
-const maskRows = async (tx: Sql, table: 'orders' | 'webhook_events', column: 'raw' | 'payload', ids: string[]): Promise<void> => {
+const maskRows = async (tx: Sql, table: 'orders' | 'webhook_events' | 'shipments', column: 'raw' | 'payload', ids: string[]): Promise<void> => {
   const BATCH = 200;
   for (let i = 0; i < ids.length; i += BATCH) {
     const slice = ids.slice(i, i + BATCH);
@@ -54,6 +55,23 @@ const redact = async (sql: Sql, storeId: string, scope: Scope, action: string, d
     const orderIds = orderRows.map((r) => r.id);
     const shopifyOrderIds = orderRows.flatMap((r) => (r.shopify_order_id ? [r.shopify_order_id] : []));
 
+    // This store's PostEx parcels for these orders, and any not yet matched to an order that
+    // carry the same phone. A GDPR request is per shop, so the other brand's parcels are untouched.
+    // Found before the phones are cleared below.
+    const shipmentRows = all
+      ? await tx<{ id: string }[]>`
+          select s.id from shipments s join postex_accounts a on a.id = s.postex_account_id where a.store_id = ${storeId}
+        `
+      : await tx<{ id: string }[]>`
+          select id from shipments
+          where postex_account_id in (select id from postex_accounts where store_id = ${storeId})
+            and (order_id = any(${orderIds}::bigint[])
+                 or customer_phone in (select phone_e164 from customers where id = any(${customerIds}::bigint[]) and phone_e164 is not null))
+        `;
+    const shipmentIds = shipmentRows.map((r) => r.id);
+    await tx`update shipments set customer_phone = null where id = any(${shipmentIds}::bigint[])`;
+    await maskRows(tx, 'shipments', 'raw', shipmentIds);
+
     await tx`
       update customers
       set name = null, phone_e164 = null, external_key = 'redacted:' || id, redacted_at = now()
@@ -82,7 +100,7 @@ const redact = async (sql: Sql, storeId: string, scope: Scope, action: string, d
         `;
     await maskRows(tx, 'webhook_events', 'payload', events.map((e) => e.id));
 
-    const result = { customers: customerIds.length, orders: orderIds.length, webhookEvents: events.length };
+    const result = { customers: customerIds.length, orders: orderIds.length, shipments: shipmentIds.length, webhookEvents: events.length };
     await tx`
       insert into audit_log (actor_id, action, entity, entity_id, after)
       values (null, ${action}, 'store', ${storeId}, ${tx.json({ ...detail, ...result } as never)})
