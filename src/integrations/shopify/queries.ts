@@ -41,7 +41,7 @@ const LINE_FIELDS = `
 `;
 
 const ORDER_FIELDS = `
-  id name createdAt updatedAt cancelledAt cancelReason
+  id name note createdAt updatedAt cancelledAt cancelReason
   displayFinancialStatus displayFulfillmentStatus
   tags discountCodes
   subtotalPriceSet { ${MONEY} }

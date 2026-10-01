@@ -108,7 +108,9 @@ things per account, read-only (PostEx has no write call anywhere in this code):
    for delivery or attempted every 5 minutes; other open parcels every 15 minutes; open parcels
    booked over 30 days ago daily; delivered, returned or cancelled in the last 7 days daily (late
    fee corrections); older terminal parcels never.
-3. **Link parcels to orders** with the matcher: by order number (store prefixes from the
+3. **Link parcels to orders** with the matcher: first by the tracking number the "Book at
+   PostEx" app writes in the order's note ("…shipped via PostEx with Tracking 2854…"; only the
+   numbers are kept, in `orders.postex_tracking_numbers`), then by order number (store prefixes from the
    `matching` setting, e.g. `{"refPrefixes": {"nur": ["NBJ"]}}`), else by COD amount and city,
    else by phone, within 3 days of booking and only on a single candidate. A fallback link opens
    an info `match_suggested` item; a parcel with no link has an open `unmatched_shipment` item

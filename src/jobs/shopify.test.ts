@@ -134,7 +134,7 @@ describe('shopify:orders', { skip: skipWithoutDb }, () => {
         order(1001, '2026-09-20T01:00:00Z'),
         order(1002, '2026-09-20T03:00:00Z', { lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: Array.from({ length: 101 }, (_, i) => line(20_000 + i, null, 1, '10.00')) } }),
         order(1003, '2026-09-20T05:00:00Z', { tags: ['PR'] }),
-        order(1004, '2026-09-20T07:00:00Z'),
+        order(1004, '2026-09-20T07:00:00Z', { note: 'Order has been shipped via PostEx with Tracking 20000000000462' }),
         order(1005, '2026-09-20T09:00:00Z'),
         order(900, '2026-07-01T09:00:00Z'), // older than 60 days before NOW: outside the window
       ],
@@ -169,6 +169,15 @@ describe('shopify:orders', { skip: skipWithoutDb }, () => {
     assert.deepEqual(big, { lines: 101, has_raw: true });
     const [pr] = await s.schema.sql<{ channel: string }[]>`select channel from orders where store_id = ${s.nur} and order_number = '#1003'`;
     assert.equal(pr?.channel, 'pr');
+  });
+
+  it('keeps the PostEx tracking number the booking app wrote in the note, and not the note itself', async () => {
+    const rows = await s.schema.sql<{ order_number: string; tracking: string[] }[]>`
+      select order_number, postex_tracking_numbers as tracking from orders where store_id = ${s.nur} and order_number in ('#1003', '#1004') order by order_number
+    `;
+    assert.deepEqual(rows.map((r) => [r.order_number, r.tracking]), [['#1003', []], ['#1004', ['20000000000462']]]);
+    const [columns] = await s.schema.sql`select count(*)::int as n from information_schema.columns where table_schema = ${s.schema.name} and table_name = 'orders' and column_name = 'note'`;
+    assert.equal(columns?.['n'], 0);
   });
 
   it('writes each stored order\'s derived state, and logs it once', async () => {

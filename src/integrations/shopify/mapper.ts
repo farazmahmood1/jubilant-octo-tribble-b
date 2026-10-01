@@ -52,6 +52,8 @@ export interface ShopifyLineNode {
 export interface ShopifyOrderNode {
   id: string;
   name: string;
+  /** Free text: staff and apps write here, customers too. Read only for tracking numbers. */
+  note?: string | null;
   createdAt: string;
   updatedAt: string;
   cancelledAt: string | null;
@@ -132,10 +134,23 @@ export interface MappedOrder {
     cancelReason: string | null;
     tags: string[];
     discountCodes: string[];
+    postexTrackingNumbers: string[];
   };
   /** Lines with the Shopify variant id still to be resolved to our variant row. */
   lines: Array<Omit<OrderLineInput, 'variantId'> & { shopifyVariantId: bigint | null }>;
 }
+
+/**
+ * PostEx tracking numbers in an order note, as the "Book at PostEx" app writes them: "Order has
+ * been shipped via PostEx with Tracking 28544400000462". Only a run of digits that follows the
+ * word "tracking" counts, so a phone number or an amount in the same note is never taken.
+ * A re-sent order can carry several; each is kept once, in the order written.
+ */
+export const postexTrackingFromNote = (note: string | null | undefined): string[] => {
+  if (!note) return [];
+  const found = [...note.matchAll(/tracking\s*(?:no\.?|number|#|id)?\s*[:#-]?\s*(\d{10,20})(?!\d)/gi)].map((m) => m[1]!);
+  return [...new Set(found)];
+};
 
 const joinName = (...parts: Array<string | null | undefined>): string | null => {
   const name = parts.filter(Boolean).join(' ').trim();
@@ -186,6 +201,7 @@ export const mapOrder = (node: ShopifyOrderNode, lineNodes: ShopifyLineNode[] = 
       cancelReason: node.cancelReason?.toLowerCase() ?? null,
       tags,
       discountCodes: node.discountCodes,
+      postexTrackingNumbers: postexTrackingFromNote(node.note),
     },
     lines: lineNodes.map((line) => ({
       lineKey: `shopify:${parseGid(line.id, 'LineItem')}`,

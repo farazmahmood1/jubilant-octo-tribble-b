@@ -45,7 +45,7 @@ const organicsTwin = order('o-1234', { storeId: ORGANICS });
 const nur: MatchOptions = { storeId: NUR };
 
 const expect = (explanation: MatchExplanation) => explanation;
-const matched = (orderId: string, method: 'order_ref' | 'cod_city_window' | 'phone_window', confidence: number) =>
+const matched = (orderId: string, method: 'tracking_note' | 'order_ref' | 'cod_city_window' | 'phone_window', confidence: number) =>
   expect({ match: { orderId, method, confidence }, reason: null, tiedOrderIds: [] });
 const unmatched = (reason: MatchExplanation['reason'], tiedOrderIds: string[] = []) =>
   expect({ match: null, reason, tiedOrderIds });
@@ -58,7 +58,16 @@ interface Case {
   expected: MatchExplanation;
 }
 
+const TRACKING = '20000000000462';
+
 const cases: Case[] = [
+  // Strategy ½: the booking app wrote this parcel's tracking number on the order
+  { name: 'the order naming the tracking number wins, even over a ref naming another order', shipment: parcel({ trackingNumber: TRACKING, orderRefNumber: '#1234' }), candidates: [order('n-1234'), order('n-1300', { name: '#1300', trackingNumbers: [TRACKING] })], expected: matched('n-1300', 'tracking_note', 1) },
+  { name: 'a typo in the ref does not matter when the order names the parcel', shipment: parcel({ trackingNumber: TRACKING, orderRefNumber: '#99999' }), candidates: [order('n-1234', { trackingNumbers: ['20000000000001', TRACKING] })], expected: matched('n-1234', 'tracking_note', 1) },
+  { name: "the other brand's order naming the same number is never a candidate", shipment: parcel({ trackingNumber: TRACKING, orderRefNumber: '#1234' }), candidates: [order('n-1234'), order('o-77', { storeId: ORGANICS, trackingNumbers: [TRACKING] })], expected: matched('n-1234', 'order_ref', 1) },
+  { name: 'two orders naming the same tracking number: ambiguous, not a guess', shipment: parcel({ trackingNumber: TRACKING }), candidates: [order('n-1', { trackingNumbers: [TRACKING] }), order('n-2', { trackingNumbers: [TRACKING] })], expected: unmatched('ambiguous', ['n-1', 'n-2']) },
+  { name: 'no order names the parcel: the order reference decides as before', shipment: parcel({ trackingNumber: TRACKING, orderRefNumber: '#1234' }), candidates: [order('n-1234', { trackingNumbers: ['20000000000001'] })], expected: matched('n-1234', 'order_ref', 1) },
+
   // Strategy 1: order reference
   { name: 'ref "#1234" matches the order named #1234', shipment: parcel({ orderRefNumber: '#1234' }), candidates: [order('n-1234')], expected: matched('n-1234', 'order_ref', 1) },
   { name: 'ref "1234" (no #) matches #1234', shipment: parcel({ orderRefNumber: '1234' }), candidates: [order('n-1234')], expected: matched('n-1234', 'order_ref', 1) },
@@ -126,7 +135,7 @@ describe('matchShipment', () => {
     for (const c of cases) {
       const match = matchShipment(c.shipment, c.candidates, c.options ?? nur);
       if (!match) continue;
-      assert.ok(['order_ref', 'cod_city_window', 'phone_window'].includes(match.method), c.name);
+      assert.ok(['tracking_note', 'order_ref', 'cod_city_window', 'phone_window'].includes(match.method), c.name);
       assert.ok(match.confidence > 0 && match.confidence <= 1, c.name);
     }
   });

@@ -36,6 +36,8 @@ export interface OrderInput {
   cancelReason: string | null;
   tags: string[];
   discountCodes: string[];
+  /** Tracking numbers the booking app wrote on the order (0008); none for consignment sales. */
+  postexTrackingNumbers?: string[];
   source: OrderSource;
   raw: unknown;
   lines: OrderLineInput[];
@@ -105,6 +107,7 @@ const upsertHeader = async (db: Db, input: OrderInput): Promise<UpsertResult> =>
     cancel_reason: input.cancelReason,
     tags: input.tags,
     discount_codes: input.discountCodes,
+    postex_tracking_numbers: input.postexTrackingNumbers ?? [],
     source: input.source,
     raw: input.raw === undefined || input.raw === null ? null : db.json(input.raw as never),
   };

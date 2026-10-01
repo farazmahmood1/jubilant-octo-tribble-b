@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { line, order, product, variant } from '../../test/shopify-fake.js';
-import { ShopifyMappingError, mapOrder, mapProduct, parseGid } from './mapper.js';
+import { ShopifyMappingError, mapOrder, mapProduct, parseGid, postexTrackingFromNote } from './mapper.js';
 import { ORDERS_QUERY } from './queries.js';
 
 describe('parseGid', () => {
@@ -26,6 +26,26 @@ describe('mapProduct', () => {
         { shopifyVariantId: 22n, sku: null, title: 'Variant 22', barcode: null },
       ],
     });
+  });
+});
+
+describe('postexTrackingFromNote', () => {
+  it('reads the tracking number the Book at PostEx app writes', () => {
+    assert.deepEqual(postexTrackingFromNote('Order has been shipped via PostEx with Tracking 20000000000462.'), ['20000000000462']);
+  });
+
+  it('takes several, once each, and the usual spellings', () => {
+    assert.deepEqual(
+      postexTrackingFromNote('Order has been shipped via PostEx with Tracking 20000000000462\nRe-sent: tracking no. 20000000000999; Tracking #20000000000462'),
+      ['20000000000462', '20000000000999'],
+    );
+    assert.deepEqual(postexTrackingFromNote('tracking number: 20000000000123'), ['20000000000123']);
+  });
+
+  it('never takes a phone number, an amount or a number not following "tracking"', () => {
+    assert.deepEqual(postexTrackingFromNote('Call 03001234567 before delivery, COD 2750'), []);
+    assert.deepEqual(postexTrackingFromNote('Tracking 12345'), [], 'too short to be a parcel');
+    assert.deepEqual(postexTrackingFromNote(null), []);
   });
 });
 

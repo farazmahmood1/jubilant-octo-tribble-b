@@ -109,6 +109,19 @@ describe('matching wired into the sync', { skip: skipWithoutDb }, () => {
     assert.equal(row?.stock_pending, true);
   });
 
+  it('links by the tracking number the booking app wrote on the order, before anything else, with no second look', async () => {
+    const named = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#1270', placedAt: PLACED, lines: [] });
+    // The parcel's own tracking number goes on the order; its typed ref is wrong.
+    const parcelId = await shipment(nurAccount.id, { ref: '#1999' });
+    const [row] = await s.schema.sql<{ tracking_number: string }[]>`select tracking_number from shipments where id = ${parcelId}`;
+    await s.schema.sql`update orders set postex_tracking_numbers = ${[row!.tracking_number]}::text[] where id = ${named}`;
+    const { counts } = await run();
+    assert.ok(counts.matched >= 1);
+    assert.deepEqual(await link(parcelId), { order_id: named, match_method: 'tracking_note' });
+    assert.equal(await openItem(SUGGESTED_KIND, parcelId), null);
+    assert.equal(await openItem(UNMATCHED_KIND, parcelId), null);
+  });
+
   it('never overrides a manual link', async () => {
     const order = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#1260', placedAt: PLACED, lines: [] });
     const other = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#1261', placedAt: PLACED, lines: [] });

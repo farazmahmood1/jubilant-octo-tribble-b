@@ -8,6 +8,7 @@
  * | # | Applies when                                   | A candidate qualifies when                                          | Result             | confidence |
  * |---|------------------------------------------------|---------------------------------------------------------------------|--------------------|------------|
  * | 0 | the PostEx account has no store                | —                                                                   | null, `account_has_no_store` |  |
+ * | ½ | the parcel has a tracking number               | same store, and the order's note names that tracking number (written by the booking app) | `tracking_note` | 1.0 |
  * | 1 | the parcel's ref parses as an order number     | same store, same order number (`#1234` = `1234` = `NBJ-1234`)       | `order_ref`        | 1.0        |
  * |   |   …with a prefix this store does not use       | —                                                                   | null, `foreign_ref_prefix`   |  |
  * |   |   …but no order in the store has that number   | —                                                                   | null, `order_ref_not_found`  |  |
@@ -20,6 +21,11 @@
  * means the order exists but is not loaded yet (older than the 60-day window). Falling back to
  * amount and city would then link the parcel to a different customer's order.
  *
+ * Why the tracking note comes first: the booking app writes the parcel's own tracking number on
+ * the order when it books it, so it is the parcel naming its order, not a resemblance. It also
+ * settles parcels whose reference was typed wrong. When no order names the parcel, matching
+ * carries on down the table as before.
+ *
  * Why a foreign prefix stops: `JO-1234` on the NUR account names a Juggun's Organics order.
  * Matching it on amount or phone inside NUR would be exactly the cross-store leak this guards.
  */
@@ -27,9 +33,10 @@ import type { Paisa } from '../lib/money.js';
 import { normalizePk } from '../lib/phone.js';
 import { daysBetweenKarachi } from '../lib/time.js';
 
-export type MatchMethod = 'order_ref' | 'cod_city_window' | 'phone_window';
+export type MatchMethod = 'tracking_note' | 'order_ref' | 'cod_city_window' | 'phone_window';
 
 export const CONFIDENCE: Record<MatchMethod, number> = {
+  tracking_note: 1,
   order_ref: 1,
   cod_city_window: 0.8,
   phone_window: 0.6,
@@ -57,6 +64,7 @@ export interface MatchExplanation {
 
 /** The parts of a mapped PostEx shipment that matching reads. */
 export interface ShipmentForMatching {
+  trackingNumber?: string | null;
   orderRefNumber: string | null;
   codAmount: Paisa | null;
   city: string | null;
@@ -75,6 +83,8 @@ export interface OrderCandidate {
   city: string | null;
   phone: string | null;
   placedAt: Date;
+  /** PostEx tracking numbers written on the order's note by the booking app. */
+  trackingNumbers?: readonly string[];
 }
 
 export interface MatchOptions {
@@ -134,6 +144,12 @@ export const explainMatch = (
   // Every strategy sees only this store's orders: the cross-store guard is here, once.
   const store = candidates.filter((c) => c.storeId === options.storeId);
   const windowDays = options.windowDays ?? DEFAULT_WINDOW_DAYS;
+
+  const tracking = shipment.trackingNumber?.trim();
+  if (tracking) {
+    const named = decide('tracking_note', store.filter((c) => c.trackingNumbers?.includes(tracking)));
+    if (named) return named;
+  }
 
   const ref = parseOrderRef(shipment.orderRefNumber);
   if (ref) {

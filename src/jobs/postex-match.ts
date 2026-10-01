@@ -44,15 +44,17 @@ const settings = async (sql: Sql): Promise<MatchingSettings> => {
 export const candidatesFor = async (
   sql: Sql,
   storeId: string,
-  parcel: { orderRef: string | null; bookedAt: Date | null },
+  parcel: { orderRef: string | null; bookedAt: Date | null; trackingNumber?: string | null },
   windowDays: number,
 ): Promise<OrderCandidate[]> => {
   const ref = parseOrderRef(parcel.orderRef)?.number ?? null;
   const from = parcel.bookedAt ? new Date(parcel.bookedAt.getTime() - (windowDays + 1) * DAY_MS) : null;
   const to = parcel.bookedAt ? new Date(parcel.bookedAt.getTime() + DAY_MS) : null;
-  if (ref === null && from === null) return [];
-  const rows = await sql<{ id: string; name: string; total: string; city: string | null; phone: string | null; placed_at: Date }[]>`
-    select o.id, o.order_number as name, o.total_paisa::text as total, a.city, c.phone_e164 as phone, o.placed_at
+  const tracking = parcel.trackingNumber?.trim() || null;
+  if (ref === null && from === null && tracking === null) return [];
+  const rows = await sql<{ id: string; name: string; total: string; city: string | null; phone: string | null; placed_at: Date; tracking: string[] }[]>`
+    select o.id, o.order_number as name, o.total_paisa::text as total, a.city, c.phone_e164 as phone, o.placed_at,
+           o.postex_tracking_numbers as tracking
     from orders o
     left join addresses a on a.id = o.shipping_address_id
     left join customers c on c.id = o.customer_id
@@ -60,9 +62,19 @@ export const candidatesFor = async (
       and (
         (${ref}::text is not null and ltrim(regexp_replace(o.order_number, '\\D', '', 'g'), '0') = ltrim(${ref}::text, '0'))
         or (${from}::timestamptz is not null and o.placed_at between ${from}::timestamptz and ${to}::timestamptz)
+        or (${tracking}::text is not null and o.postex_tracking_numbers @> array[${tracking}::text])
       )
   `;
-  return rows.map((r) => ({ id: r.id, storeId, name: r.name, codAmount: readPaisa(r.total), city: r.city, phone: r.phone, placedAt: r.placed_at }));
+  return rows.map((r) => ({
+    id: r.id,
+    storeId,
+    name: r.name,
+    codAmount: readPaisa(r.total),
+    city: r.city,
+    phone: r.phone,
+    placedAt: r.placed_at,
+    trackingNumbers: r.tracking,
+  }));
 };
 
 /** Tries every unmatched parcel of one account. Returns the ids it linked. */
@@ -89,9 +101,12 @@ export const matchUnmatched = async (
 
   const linked: string[] = [];
   for (const parcel of parcels) {
-    const candidates = storeId ? await candidatesFor(sql, storeId, { orderRef: parcel.order_ref_number, bookedAt: parcel.booked_at }, windowDays) : [];
+    const candidates = storeId
+      ? await candidatesFor(sql, storeId, { orderRef: parcel.order_ref_number, bookedAt: parcel.booked_at, trackingNumber: parcel.tracking_number }, windowDays)
+      : [];
     const explanation = explainMatch(
       {
+        trackingNumber: parcel.tracking_number,
         orderRefNumber: parcel.order_ref_number,
         codAmount: parcel.cod === null ? null : readPaisa(parcel.cod),
         city: parcel.city,
@@ -128,7 +143,7 @@ export const matchUnmatched = async (
         where id = ${parcel.id} and order_id is null
       `;
       await resolveOpenReviewItem(tx, unmatchedKey, `Matched by ${match.method}`);
-      if (match.method !== 'order_ref') {
+      if (match.method !== 'order_ref' && match.method !== 'tracking_note') {
         await openReviewItem(tx, {
           kind: SUGGESTED_KIND,
           dedupeKey: `${SUGGESTED_KIND}:${parcel.id}`,
@@ -141,7 +156,7 @@ export const matchUnmatched = async (
       }
     });
     counts.matched++;
-    if (match.method !== 'order_ref') counts.suggested++;
+    if (match.method !== 'order_ref' && match.method !== 'tracking_note') counts.suggested++;
     linked.push(parcel.id);
   }
   return linked;
