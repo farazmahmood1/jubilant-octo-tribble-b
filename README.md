@@ -261,6 +261,28 @@ API (signed in; amounts are integer paisa in strings): `GET /api/v1/accounting/i
 `POST /api/v1/accounting/periods/:year/:month/close`, `GET|PUT /api/v1/accounting/opening-balances`.
 The dashboard's Accounting page uses them.
 
+## Reports
+
+`src/reports/` computes every dashboard number once, in SQL, from the ledger (Step 14): one file
+per report, each taking a typed `ReportFilter` (`from`, `to` as Karachi days, `store`) and
+returning typed rows, each with a drill-down returning the ids behind the figure. All read the
+`ledger_lines` view (0010), which resolves every journal line to its origin (a sale, a charge, a
+payout) and its parcel, with a reversal carrying its original's origin so the two net out.
+
+| Report | Basis |
+| --- | --- |
+| `deliveredRevenue` | the Sales revenue account: delivered parcels and consignment sales only |
+| `pnl`, `netProfit` | income and expense accounts, optionally by month |
+| `returnRate`, `deliverySuccess` | parcels booked in the period, PR parcels excluded; returned ÷ delivered-or-returned; delivered ÷ final outcomes, and first-attempt share |
+| `cashAwaitingPayout` | COD receivable per parcel at the end of the period, aged 0–7 / 8–14 / 15–30 / 31+ days since delivery; charges on parcels with no sale apart |
+| `profitPerParcel` | each parcel's own lines: revenue − goods − PostEx charges − marketing − write-off |
+| `breakdown` | the same lines by store (brand), month, city, partner, influencer code or agent; rows add up to the P&L |
+| `productBreakdown` | units and item sales from order lines on delivered parcels (the ledger has one sale per parcel) |
+| `trialBalanceReport`, `generalLedger`, `partnerLedger` | opening, period movements and closing per account / line / counterparty |
+
+`REPORT_PLANS` lists each report's query plan and the indexes it must use; a test runs every
+plan with sequential scans disabled and checks it.
+
 ## Worker schedule
 
 Neon suspends its compute when nothing queries it, so the jobs are timed to wake it as rarely as

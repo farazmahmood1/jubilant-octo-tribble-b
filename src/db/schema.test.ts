@@ -43,7 +43,7 @@ describe('schema', { skip: skipWithoutDb }, () => {
 
   it('creates exactly the expected tables', async () => {
     const rows = await schema.sql`
-      select table_name from information_schema.tables where table_schema = ${schema.name} order by table_name
+      select table_name from information_schema.tables where table_schema = ${schema.name} and table_type = 'BASE TABLE' order by table_name
     `;
     assert.deepEqual(
       rows.map((r) => r['table_name']),
@@ -56,6 +56,11 @@ describe('schema', { skip: skipWithoutDb }, () => {
         'stock_adjustments', 'stock_moves', 'stock_quants', 'stores', 'sync_runs', 'tax_rates', 'users', 'variants', 'webhook_events',
       ],
     );
+  });
+
+  it('creates the reporting view, and only that view', async () => {
+    const rows = await schema.sql`select table_name from information_schema.views where table_schema = ${schema.name} order by table_name`;
+    assert.deepEqual(rows.map((r) => r['table_name']), ['ledger_lines']);
   });
 
   it('gives mutable tables created_at and updated_at, and append-only ones a single timestamp', async () => {

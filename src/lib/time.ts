@@ -104,6 +104,12 @@ export const endOfKarachiDay = (day: string): Date => {
   return parsePostexLocal(`${day} 23:59:59.999`);
 };
 
+/** The first instant of a Karachi calendar day (`"2026-09-30"`). Throws RangeError for a day that does not exist. */
+export const startOfKarachiDate = (day: string): Date => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RangeError(`Not a calendar day: "${day}"`);
+  return parsePostexLocal(`${day} 00:00:00`);
+};
+
 /** Midnight in Karachi at the start of the Karachi day containing `date`. */
 export const startOfKarachiDay = (date: Date): Date => {
   const { year, month, day } = karachiParts(date);
