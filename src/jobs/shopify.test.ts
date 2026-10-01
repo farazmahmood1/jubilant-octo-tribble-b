@@ -121,6 +121,67 @@ describe('shopify:catalogue', { skip: skipWithoutDb }, () => {
   });
 });
 
+describe("shopify:catalogue reads Shopify's cost per item and stock levels", { skip: skipWithoutDb }, () => {
+  let s: Stores;
+  let nur: FakeShopify;
+  const variantId = async (shopifyId: number) =>
+    (await s.schema.sql<{ id: string }[]>`select id from variants where shopify_variant_id = ${shopifyId}`)[0]!.id;
+  const costs = async (shopifyId: number) =>
+    (await s.schema.sql<{ cost: string; from: string; note: string | null }[]>`
+      select unit_cost_paisa::text as cost, effective_from::text as from, note from product_costs where variant_id = ${await variantId(shopifyId)} order by id
+    `).map((r) => [r.cost, r.from, r.note]);
+
+  before(async () => {
+    s = await migratedWithStores();
+    nur = fakeShopify({ products: [product(1, [variant(11, 'NBJ-1'), variant(12, 'NBJ-2')]), product(2, [variant(21, 'NBJ-3')])] });
+    nur.inventory.set(11, { cost: '450.00', onHand: 883, available: 76, committed: 807 });
+    nur.inventory.set(12, { cost: null, onHand: 5, available: 5, committed: 0 });
+    nur.inventory.set(21, { cost: '0.00', onHand: 0, available: 0, committed: 0 });
+  });
+
+  after(async () => {
+    await s?.schema.drop();
+  });
+
+  it('adds a first cost back to the start of the synced history, and keeps every level', async () => {
+    const stats = await syncCatalogue(deps(s, nur));
+    assert.deepEqual([stats['costsAdded'], stats['noCost']], [1, 2], 'an empty or zero cost is no cost');
+    assert.deepEqual(await costs(11), [['45000', '2026-01-01', 'shopify:cost_per_item']]);
+    const [level] = await s.schema.sql`select location_name, on_hand, available, committed from shopify_stock_levels where variant_id = ${await variantId(11)}`;
+    assert.deepEqual(level, { location_name: 'Shop location', on_hand: 883, available: 76, committed: 807 });
+  });
+
+  it('a second run with the same costs adds no cost row; a changed cost takes effect today', async () => {
+    await syncCatalogue(deps(s, nur));
+    assert.equal((await costs(11)).length, 1);
+    nur.inventory.set(11, { cost: '480.00', onHand: 880, available: 70, committed: 810 });
+    const stats = await syncCatalogue(deps(s, nur));
+    assert.equal(stats['costsChanged'], 1);
+    assert.deepEqual(await costs(11), [['45000', '2026-01-01', 'shopify:cost_per_item'], ['48000', '2026-10-01', 'shopify:cost_per_item']]);
+    const [level] = await s.schema.sql`select on_hand from shopify_stock_levels where variant_id = ${await variantId(11)}`;
+    assert.equal(level?.['on_hand'], 880, 'levels are the latest reading');
+  });
+
+  it("does not take Shopify's first cost back over a cost a person already entered", async () => {
+    await s.schema.sql`insert into product_costs (variant_id, unit_cost_paisa, effective_from, source) values (${await variantId(12)}, '30000', '2026-03-01', 'manual')`;
+    nur.inventory.set(12, { cost: '310.00', onHand: 5, available: 5, committed: 0 });
+    await syncCatalogue(deps(s, nur));
+    assert.deepEqual(await costs(12), [['30000', '2026-03-01', null], ['31000', '2026-10-01', 'shopify:cost_per_item']]);
+  });
+
+  it('closes the cost_missing items a new cost answers, and marks the parcels that carried the variant for re-posting', async () => {
+    const id = await variantId(21);
+    await s.schema.sql`
+      insert into reconciliation_items (kind, dedupe_key, detail) values
+        ('cost_missing', ${`cost_missing:${id}:2026-09-01`}, ${s.schema.sql.json({ variantId: id, needCostOn: '2026-09-01' })})
+    `;
+    nur.inventory.set(21, { cost: '200.00', onHand: 0, available: 0, committed: 0 });
+    await syncCatalogue(deps(s, nur));
+    const [item] = await s.schema.sql`select status, note from reconciliation_items where dedupe_key = ${`cost_missing:${id}:2026-09-01`}`;
+    assert.deepEqual(item, { status: 'resolved', note: 'Cost imported from Shopify, effective 2026-01-01' });
+  });
+});
+
 describe('shopify:orders', { skip: skipWithoutDb }, () => {
   let s: Stores;
   let nur: FakeShopify;

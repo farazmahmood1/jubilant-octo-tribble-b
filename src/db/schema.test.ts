@@ -52,6 +52,7 @@ describe('schema', { skip: skipWithoutDb }, () => {
         'fiscal_periods', 'integration_cursors', 'invoice_lines', 'invoices', 'journal_entries', 'journal_lines', 'locations', 'order_lines',
         'order_state_log', 'orders', 'partner_sales_imports', 'payments', 'payout_lines', 'postex_accounts', 'product_costs', 'products',
         'reconciliation_items', 'retail_partners', 'return_check_ins', 'schema_migrations', 'shipment_charges', 'shipment_events', 'shipments',
+        'shopify_stock_levels',
         'stock_adjustments', 'stock_moves', 'stock_quants', 'stores', 'sync_runs', 'tax_rates', 'users', 'variants', 'webhook_events',
       ],
     );

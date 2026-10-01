@@ -158,6 +158,21 @@ describe('API: trial balance, ledger, month close, opening balances, confirmatio
     assert.deepEqual([before['units'], before['stockValue'], before['ledgerValue']], [0, '0', '0']);
   });
 
+  it("serves Shopify's stock beside ours, and takes the opening count from it once", async () => {
+    const [variant] = await variantsIn(s.schema.sql, s.organics, 1, 9_800);
+    await s.schema.sql`
+      insert into shopify_stock_levels (variant_id, store_id, location_gid, location_name, on_hand, available, committed, read_at)
+      values (${variant!}, ${s.organics}, 'gid://shopify/Location/9', 'Shop location', 12, 12, 0, now())
+    `;
+    const comparison = await call('GET', '/stock/shopify-comparison?store=organics');
+    const rows = comparison.body['rows'] as Array<{ variantId: string; estimate: number; difference: number }>;
+    assert.deepEqual(rows.map((r) => [r.variantId, r.estimate, r.difference]), [[variant, 12, 12]]);
+    assert.equal((await call('POST', '/stock/opening-from-shopify', { asAt: '2026-09-31', store: 'organics' })).status, 400);
+    const taken = await call('POST', '/stock/opening-from-shopify', { asAt: '2026-09-30', store: 'organics' });
+    assert.deepEqual([taken.status, taken.body['lines'], taken.body['units']], [201, 1, 12]);
+    assert.equal((await call('POST', '/stock/opening-from-shopify', { asAt: '2026-09-30', store: 'organics' })).status, 409);
+  });
+
   it("confirmation tags: the team's tags by default, replaced and audited", async () => {
     const current = await call('GET', '/settings/confirmation-tags');
     assert.deepEqual((current.body['confirmationTags'] as Record<string, string[]>)['confirmed'], ['Order Confirmed', 'COD-Confirmed']);

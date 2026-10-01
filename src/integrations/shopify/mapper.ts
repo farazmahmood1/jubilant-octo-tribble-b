@@ -114,6 +114,54 @@ export const mapProduct = (node: ShopifyProductNode, variants: ShopifyVariantNod
   variants: variants.map((v) => ({ shopifyVariantId: parseGid(v.id, 'ProductVariant'), sku: v.sku, title: v.title, barcode: v.barcode })),
 });
 
+export interface ShopifyVariantInventoryNode {
+  id: string;
+  inventoryItem: {
+    tracked: boolean;
+    unitCost: { amount: string; currencyCode: string } | null;
+    inventoryLevels: {
+      pageInfo: { hasNextPage: boolean };
+      nodes: Array<{ location: { id: string; name: string }; quantities: Array<{ name: string; quantity: number }> }>;
+    };
+  } | null;
+}
+
+export interface MappedVariantInventory {
+  shopifyVariantId: bigint;
+  /** Shopify's "Cost per item", or null where nobody has entered one. */
+  unitCost: Paisa | null;
+  tracked: boolean;
+  levels: Array<{ locationGid: string; locationName: string; onHand: number; available: number; committed: number }>;
+  /** More locations than one page holds: the levels are incomplete and the sync says so. */
+  levelsTruncated: boolean;
+}
+
+/**
+ * A variant's cost and stock. A cost of zero is read as "not entered" (Shopify shows an empty
+ * Cost per item as nothing, and a real product does not cost nothing); a cost in another
+ * currency is refused rather than converted.
+ */
+export const mapVariantInventory = (node: ShopifyVariantInventoryNode): MappedVariantInventory => {
+  const item = node.inventoryItem;
+  const cost = item?.unitCost ?? null;
+  if (cost && cost.currencyCode !== 'PKR') throw new ShopifyMappingError(`Cost of ${node.id} is in ${cost.currencyCode}, expected PKR`);
+  const unitCost = cost ? fromRupeeString(cost.amount) : null;
+  const quantity = (q: Array<{ name: string; quantity: number }>, name: string) => q.find((x) => x.name === name)?.quantity ?? 0;
+  return {
+    shopifyVariantId: parseGid(node.id, 'ProductVariant'),
+    unitCost: unitCost !== null && unitCost > 0n ? unitCost : null,
+    tracked: item?.tracked ?? false,
+    levels: (item?.inventoryLevels.nodes ?? []).map((level) => ({
+      locationGid: level.location.id,
+      locationName: level.location.name,
+      onHand: quantity(level.quantities, 'on_hand'),
+      available: quantity(level.quantities, 'available'),
+      committed: quantity(level.quantities, 'committed'),
+    })),
+    levelsTruncated: item?.inventoryLevels.pageInfo.hasNextPage ?? false,
+  };
+};
+
 export interface MappedOrder {
   customer: { shopifyCustomerId: bigint | null; name: string | null; phone: string | null };
   address: AddressInput | null;

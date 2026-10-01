@@ -74,10 +74,21 @@ const connection = <T>(all: T[], offset: number, size: number) => ({
   nodes: all.slice(offset, offset + size),
 });
 
+/** A variant's cost per item and stock at one location, as the inventory query returns them. */
+export interface FakeInventory {
+  /** Rupees as Shopify sends them ("450.00"), or null for no cost entered. */
+  cost: string | null;
+  onHand: number;
+  available: number;
+  committed: number;
+}
+
 export interface FakeShopify {
   graphql: GraphqlFn;
   products: ShopifyProductNode[];
   orders: ShopifyOrderNode[];
+  /** Keyed by Shopify variant id. Variants not listed have no cost and no levels. */
+  inventory: Map<number, FakeInventory>;
   /** Every call, in order: the operation name and its variables. */
   calls: Array<{ operation: string; variables: Record<string, unknown> }>;
   /** Make the n-th call of an operation (1-based) throw once, e.g. to interrupt a sync mid-run. */
@@ -85,7 +96,7 @@ export interface FakeShopify {
 }
 
 /**
- * Serves the four operations the syncs use. Pages are `pageSize` long whatever `first` asks
+ * Serves the operations the syncs use. Pages are `pageSize` long whatever `first` asks
  * for, so a handful of records spans several pages. Orders honour the `updated_at:>=` filter
  * and come back oldest update first, as `sortKey: UPDATED_AT` does.
  */
@@ -95,6 +106,7 @@ export const fakeShopify = (init: { products?: ShopifyProductNode[]; orders?: Sh
   const fake: FakeShopify = {
     products: init.products ?? [],
     orders: init.orders ?? [],
+    inventory: new Map(),
     calls: [],
     failOnce: () => {},
     graphql: async () => {
@@ -128,6 +140,40 @@ export const fakeShopify = (init: { products?: ShopifyProductNode[]; orders?: Sh
     if (operation === 'ProductVariants') {
       const target = fake.products.find((p) => p.id === variables['id']);
       return { product: target ? { variants: connection(target.variants.nodes, offset, nestedSize) } : null };
+    }
+    if (operation === 'VariantInventory') {
+      const variants = fake.products.flatMap((p) => p.variants.nodes);
+      const page = connection(variants, offset, pageSize);
+      return {
+        productVariants: {
+          ...page,
+          nodes: page.nodes.map((v) => {
+            const stock = fake.inventory.get(Number(v.id.split('/').pop()));
+            return {
+              id: v.id,
+              inventoryItem: {
+                tracked: true,
+                unitCost: stock?.cost ? { amount: stock.cost, currencyCode: 'PKR' } : null,
+                inventoryLevels: {
+                  pageInfo: { hasNextPage: false },
+                  nodes: stock
+                    ? [
+                        {
+                          location: { id: 'gid://shopify/Location/1', name: 'Shop location' },
+                          quantities: [
+                            { name: 'on_hand', quantity: stock.onHand },
+                            { name: 'available', quantity: stock.available },
+                            { name: 'committed', quantity: stock.committed },
+                          ],
+                        },
+                      ]
+                    : [],
+                },
+              },
+            };
+          }),
+        },
+      };
     }
     if (operation === 'Orders') {
       const since = /updated_at:>='([^']+)'/.exec(String(variables['query']))?.[1];

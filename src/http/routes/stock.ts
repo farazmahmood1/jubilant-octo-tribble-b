@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
 import { postShipmentAccounting } from '../../domain/accounting.js';
+import { openingStockFromShopify, shopifyStockComparison } from '../../domain/opening-stock.js';
 import { StockError, checkInReturn, recordAdjustment, returnsAwaitingCheckIn } from '../../domain/stock.js';
 import { endOfKarachiDay } from '../../lib/time.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
@@ -33,6 +34,8 @@ const adjustment = z.object({
     .min(1)
     .max(500),
 });
+const storeQuery = z.object({ store: z.enum(['nur', 'organics']).optional() });
+const openingFromShopify = z.object({ asAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), store: z.enum(['nur', 'organics']).optional() });
 const variantsQuery = z.object({ search: z.string().trim().min(1).max(80), store: z.enum(['nur', 'organics']).optional() });
 
 const asAtDay = (day: string): Date => {
@@ -113,6 +116,26 @@ export const stockRouter = (getSql: SqlProvider): Router => {
       limit 50
     `;
     res.json({ variants: [...rows] });
+  });
+
+  /** Shopify's stock per variant beside our warehouse, with the shelf estimate and its parts. */
+  router.get('/stock/shopify-comparison', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { store } = parse(storeQuery, req.query);
+    res.json({ rows: await shopifyStockComparison(sql, store) });
+  });
+
+  /** Takes the opening count from Shopify's figures, dated at the cut-over day. Once per store. */
+  router.post('/stock/opening-from-shopify', async (req, res) => {
+    const sql = requireSql(getSql);
+    const body = parse(openingFromShopify, req.body);
+    asAtDay(body.asAt);
+    const result = await openingStockFromShopify(sql, {
+      asAt: body.asAt,
+      actorId: await actorId(sql, sessionUser(req)),
+      ...(body.store ? { storeKey: body.store } : {}),
+    }).catch(asHttp);
+    res.status(result ? 201 : 200).json(result ?? { adjustmentId: null, lines: 0, units: 0 });
   });
 
   router.post('/stock/adjustments', async (req, res) => {

@@ -6,6 +6,7 @@ import { type OrderUpsertResult, upsertOrder } from '../db/repos/orders.js';
 import { upsertProduct } from '../db/repos/products.js';
 import { recomputeOrderState } from '../db/repos/order-state.js';
 import { listOpenReviewItems, openReviewItem, resolveReviewItem } from '../db/repos/review.js';
+import { importShopifyCost, replaceStockLevels } from '../db/repos/shopify-inventory.js';
 import { atomically } from '../db/repos/upsert.js';
 import { upsertVariant } from '../db/repos/variants.js';
 import { shopifyClient } from '../integrations/shopify/client.js';
@@ -14,18 +15,23 @@ import {
   type ShopifyLineNode,
   type ShopifyOrderNode,
   type ShopifyProductNode,
+  type ShopifyVariantInventoryNode,
   type ShopifyVariantNode,
   mapOrder,
   mapProduct,
+  mapVariantInventory,
 } from '../integrations/shopify/mapper.js';
 import {
   ORDERS_QUERY,
   ORDER_LINES_QUERY,
   ORDER_QUERY,
   PAGE_SIZE,
+  INVENTORY_PAGE_SIZE,
   PRODUCTS_QUERY,
   PRODUCT_VARIANTS_QUERY,
+  VARIANT_INVENTORY_QUERY,
 } from '../integrations/shopify/queries.js';
+import { formatKarachi } from '../lib/time.js';
 import type { Logger } from '../logger.js';
 import type { JobDefinition, JobStats } from './runner.js';
 
@@ -169,8 +175,45 @@ export const syncCatalogue = async (deps: SyncDeps): Promise<JobStats> => {
       select count(*)::int as n from variants where store_id = ${store.id} and sku is null and deleted_at is null
     `;
     counts['unmappedSkus'] = row?.n ?? 0;
+    if (complete) await syncInventory(deps, store, counts);
   }
   return flatten(perStore);
+};
+
+/**
+ * Shopify's cost per item and stock per location for every variant of a store, after the
+ * catalogue pass has stored the variants. Costs go to `product_costs` only when they change;
+ * levels replace the last reading. Counted as `costsAdded`, `costsChanged`, `noCost` (tracked
+ * variants nobody has costed) and `levelsTruncated`.
+ */
+const syncInventory = async (deps: SyncDeps, store: StoreTarget, counts: Counts): Promise<void> => {
+  const variantIds = await loadVariantIds(deps.sql, store.id);
+  const now = (deps.now ?? (() => new Date()))();
+  const today = formatKarachi(now).slice(0, 10);
+  let after: string | null = null;
+  do {
+    if (deps.signal?.aborted) return;
+    const data: { productVariants: Connection<ShopifyVariantInventoryNode> } = await store.graphql(VARIANT_INVENTORY_QUERY, { first: INVENTORY_PAGE_SIZE, after });
+    for (const node of data.productVariants.nodes) {
+      let inventory;
+      try {
+        inventory = mapVariantInventory(node);
+      } catch (error) {
+        bump(counts, 'inventorySkipped');
+        deps.logger.warn({ store: store.key, variant: node.id, err: error }, 'Variant inventory skipped');
+        continue;
+      }
+      const variantId = variantIds.get(String(inventory.shopifyVariantId));
+      if (!variantId) continue;
+      const cost = await importShopifyCost(deps.sql, variantId, inventory.unitCost, today);
+      if (cost === 'first') bump(counts, 'costsAdded');
+      if (cost === 'changed') bump(counts, 'costsChanged');
+      if (cost === 'none' && inventory.tracked) bump(counts, 'noCost');
+      await replaceStockLevels(deps.sql, store.id, variantId, inventory, now);
+      if (inventory.levelsTruncated) bump(counts, 'levelsTruncated');
+    }
+    after = data.productVariants.pageInfo.hasNextPage ? data.productVariants.pageInfo.endCursor : null;
+  } while (after);
 };
 
 /** Shopify variant id → our variant id, for linking order lines. Deleted variants still link: old orders used them. */

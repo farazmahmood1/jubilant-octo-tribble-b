@@ -97,6 +97,29 @@ stored, saved after every page. A run that stops part-way resumes there; a secon
 only the last 10 minutes and inserts nothing. Skipped items are logged by order name or variant
 id only, never with customer data.
 
+### Cost per item and stock from Shopify
+
+The catalogue sync also reads each variant's **Cost per item** and its stock per Shopify
+location (read_inventory, read_locations):
+
+- **Costs** go into `product_costs` only when Shopify's cost changes, so an unchanged catalogue
+  adds nothing. A variant's first cost, when it has none at all, is taken back to the start of
+  the synced history (`costs` setting `shopifyFirstEffectiveFrom`, default `2026-01-01`) so the
+  parcels already delivered can be costed; later changes take effect the day they are seen. A
+  dated cost entered by a person always wins for its dates. A new cost closes the
+  `cost_missing` items it answers and re-posts the COGS it unblocks. An empty or zero cost is
+  "not entered" (counted as `noCost`).
+- **Stock levels** are kept in `shopify_stock_levels` as Shopify reports them. They are compared
+  with, never written into, our ledger.
+
+**Shopify's "on hand" is not the shelf.** The team ships through PostEx and does not mark orders
+fulfilled, so parcels that have left stay "committed" and "on hand" in Shopify. The Inventory
+page's *Shopify stock* card shows, per product: on hand, committed, how much of that is on orders
+not booked yet, available, the **shelf estimate** (available + committed to unbooked orders),
+our warehouse, and the difference. *Use the shelf estimate as the opening count* (once per store)
+records an opening stock count dated at the cut-over day that makes our warehouse today equal the
+estimate (`GET /api/v1/stock/shopify-comparison`, `POST /api/v1/stock/opening-from-shopify`).
+
 ## PostEx sync
 
 `npm run job -- postex:sync` (every 15 minutes on the worker, see *Worker schedule*) does four

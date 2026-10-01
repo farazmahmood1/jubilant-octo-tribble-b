@@ -23,6 +23,38 @@ export const PRODUCTS_QUERY = `
   }
 `;
 
+/** Variants per page for the inventory pass: each carries its levels, so the page is kept small. */
+export const INVENTORY_PAGE_SIZE = 50;
+/** Locations per variant. Both stores have one today; more than this is reported, not dropped silently. */
+export const LOCATIONS_PER_VARIANT = 10;
+
+/**
+ * Cost per item and stock per location for every variant (read_inventory, read_locations). A
+ * separate pass from the products query: nesting levels inside variants inside products would
+ * exceed Shopify's query cost limit.
+ */
+export const VARIANT_INVENTORY_QUERY = `
+  query VariantInventory($first: Int!, $after: String) {
+    productVariants(first: $first, after: $after, sortKey: ID) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        inventoryItem {
+          tracked
+          unitCost { amount currencyCode }
+          inventoryLevels(first: ${LOCATIONS_PER_VARIANT}) {
+            pageInfo { hasNextPage }
+            nodes {
+              location { id name }
+              quantities(names: ["on_hand", "available", "committed"]) { name quantity }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 export const PRODUCT_VARIANTS_QUERY = `
   query ProductVariants($id: ID!, $after: String) {
     product(id: $id) {

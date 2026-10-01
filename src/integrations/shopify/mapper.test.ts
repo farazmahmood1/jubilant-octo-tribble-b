@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { line, order, product, variant } from '../../test/shopify-fake.js';
-import { ShopifyMappingError, mapOrder, mapProduct, parseGid, postexTrackingFromNote } from './mapper.js';
+import { ShopifyMappingError, type ShopifyVariantInventoryNode, mapOrder, mapProduct, mapVariantInventory, parseGid, postexTrackingFromNote } from './mapper.js';
 import { ORDERS_QUERY } from './queries.js';
 
 describe('parseGid', () => {
@@ -26,6 +26,35 @@ describe('mapProduct', () => {
         { shopifyVariantId: 22n, sku: null, title: 'Variant 22', barcode: null },
       ],
     });
+  });
+});
+
+describe('mapVariantInventory', () => {
+  const node = (cost: { amount: string; currencyCode: string } | null, more = false): ShopifyVariantInventoryNode => ({
+    id: 'gid://shopify/ProductVariant/77',
+    inventoryItem: {
+      tracked: true,
+      unitCost: cost,
+      inventoryLevels: {
+        pageInfo: { hasNextPage: more },
+        nodes: [{ location: { id: 'gid://shopify/Location/1', name: 'Shop location' }, quantities: [{ name: 'on_hand', quantity: 883 }, { name: 'available', quantity: 76 }, { name: 'committed', quantity: 807 }] }],
+      },
+    },
+  });
+
+  it("reads the cost per item as paisa and each location's on hand, available and committed", () => {
+    const mapped = mapVariantInventory(node({ amount: '450.50', currencyCode: 'PKR' }));
+    assert.equal(mapped.shopifyVariantId, 77n);
+    assert.equal(mapped.unitCost, 45_050n);
+    assert.deepEqual(mapped.levels, [{ locationGid: 'gid://shopify/Location/1', locationName: 'Shop location', onHand: 883, available: 76, committed: 807 }]);
+    assert.equal(mapped.levelsTruncated, false);
+  });
+
+  it('reads an empty or zero cost as no cost, refuses another currency, and reports truncated levels', () => {
+    assert.equal(mapVariantInventory(node(null)).unitCost, null);
+    assert.equal(mapVariantInventory(node({ amount: '0.00', currencyCode: 'PKR' })).unitCost, null);
+    assert.throws(() => mapVariantInventory(node({ amount: '3.00', currencyCode: 'USD' })), ShopifyMappingError);
+    assert.equal(mapVariantInventory(node(null, true)).levelsTruncated, true);
   });
 });
 
