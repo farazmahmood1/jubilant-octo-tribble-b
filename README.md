@@ -358,6 +358,33 @@ API (signed in; amounts are integer paisa in strings): `GET|POST /api/v1/purchas
 `POST .../orders/:id/bills`, `GET .../bills?unpaid=true`, `POST .../bills/:id/payments`,
 `GET .../reorder-suggestions?store=&windowDays=&coverDays=`, `GET|PUT /api/v1/settings/purchasing`.
 
+## Consignment
+
+Stock at a retail partner stays ours until it sells (migration `0015_consignment.sql`, rules in
+`src/domain/consignment.ts`). Each partner has its own stock location. A **transfer** moves units
+`warehouse → partner`, or back (never more than the partner holds).
+
+The partner's **sales sheet** is a CSV in the published template
+(`GET /api/v1/consignment/template.csv`: `date,sku,quantity,unit_price,tax`, amounts in rupees,
+`tax` optional). Importing is two-phase:
+
+1. **Dry run** (`POST /api/v1/consignment/imports/dry-run` with `partnerId`, `fileName`, `csv`)
+   writes nothing and returns a report: per row (the file's line number, header = 1), every
+   problem it has: not a date, in the future, in a closed month, unknown or ambiguous SKU, bad
+   quantity or amount, no product cost on the sale day, more units than the partner holds
+   (counting the rows above).
+2. **Commit** (`POST /api/v1/consignment/imports`) validates again inside the transaction and
+   commits nothing while any row is invalid, unless `force: true`, which commits the valid rows
+   and records the skipped ones. Per sold line: `partner → customer`; per brand: an invoice
+   (`CI-00012-NUR`); per brand and sale day: Partner receivable / revenue and tax, and COGS /
+   Inventory at the cost on the sale day.
+
+The same file again (by SHA-256, whatever its line endings) is refused unless sent with
+`newVersion: true`. `POST /api/v1/consignment/imports/:id/reverse` (with a `reason`) reverses an
+import as a unit: units back to the partner, every entry reversed, invoices voided; a reversed
+file can be imported again. Also: `GET|POST /api/v1/consignment/partners`,
+`GET .../partners/:id/stock`, `POST /api/v1/consignment/transfers`, `GET /api/v1/consignment/imports`.
+
 ## Reports
 
 `src/reports/` computes every dashboard number once, in SQL, from the ledger (Step 14): one file

@@ -5,6 +5,7 @@ import { requireAuth } from '../middleware/require-auth.js';
 import { accountingRouter } from './accounting.js';
 import { authRouter } from './auth.js';
 import { confirmationsRouter } from './confirmations.js';
+import { consignmentRouter } from './consignment.js';
 import { healthRouter } from './health.js';
 import { influencersRouter } from './influencers.js';
 import { integrationsRouter } from './integrations.js';
@@ -32,5 +33,6 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(influencersRouter(getSql));
   apiRouter.use(reportsRouter(getSql));
   apiRouter.use(purchasingRouter(getSql));
+  apiRouter.use(consignmentRouter(getSql));
   return apiRouter;
 };
