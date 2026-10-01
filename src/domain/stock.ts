@@ -330,6 +330,8 @@ export const checkInReturn = async (
       returning id
     `;
     if (!row) throw new StockError(`Parcel ${parcel.tracking_number} is already checked in`);
+    // A damaged return is written off in the journal: the accounting pass picks it up.
+    await tx`update shipments set accounting_pending = true where id = ${shipmentId}`;
     await tx`
       insert into audit_log (actor_id, action, entity, entity_id, after)
       values (${actorId}, 'stock.return_check_in', 'shipments', ${shipmentId}, ${tx.json({ outcome, checkInId: row.id } as never)})

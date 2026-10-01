@@ -1,3 +1,4 @@
+import { postShipmentAccounting } from '../../domain/accounting.js';
 import { reconcileShipmentStock } from '../../domain/stock.js';
 import { recomputeOrderState } from './order-state.js';
 import { resolveOpenReviewItem } from './review.js';
@@ -23,8 +24,8 @@ export interface LinkResult {
 
 /**
  * A person links a parcel to an order. One transaction: the link, closing the parcel's
- * `unmatched_shipment` and `match_suggested` items, the audit row, the parcel's stock and the
- * order's state. Either all of it happens or none of it does.
+ * `unmatched_shipment` and `match_suggested` items, the audit row, the parcel's stock, the
+ * order's state and its postings (the sale, if it was delivered). Either all of it happens or none of it does.
  *
  * Only an unmatched parcel can be linked. Re-pointing a linked parcel would leave its stock
  * moves describing the old order's lines; that needs an unlink with reversing moves, which is
@@ -48,7 +49,7 @@ export const linkShipmentToOrder = async (db: Db, input: { shipmentId: string; o
     }
 
     await tx`
-      update shipments set order_id = ${input.orderId}, match_method = 'manual', match_confidence = 1, stock_pending = true
+      update shipments set order_id = ${input.orderId}, match_method = 'manual', match_confidence = 1, stock_pending = true, accounting_pending = true
       where id = ${input.shipmentId}
     `;
     const note = input.note?.trim() || `Linked by hand to ${order.order_number}`;
@@ -63,5 +64,6 @@ export const linkShipmentToOrder = async (db: Db, input: { shipmentId: string; o
     `;
     const stock = await reconcileShipmentStock(tx, input.shipmentId);
     await recomputeOrderState(tx, input.orderId);
+    await postShipmentAccounting(tx, input.shipmentId);
     return { shipmentId: input.shipmentId, orderId: input.orderId, orderNumber: order.order_number, closedItems, stockMoves: stock.moves };
   });

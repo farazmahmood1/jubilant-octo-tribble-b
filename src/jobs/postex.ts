@@ -4,6 +4,7 @@ import { getCursor, setCursor } from '../db/repos/cursors.js';
 import { openReviewItem } from '../db/repos/review.js';
 import {
   DEFAULT_TIERS,
+  accountingPending,
   activeParcels,
   stockPending,
   type RefreshTiers,
@@ -16,6 +17,7 @@ import {
 } from '../db/repos/shipments.js';
 import { recomputeOrderState } from '../db/repos/order-state.js';
 import { atomically } from '../db/repos/upsert.js';
+import { postShipmentAccounting } from '../domain/accounting.js';
 import { reconcileShipmentStock } from '../domain/stock.js';
 import { postexClient } from '../integrations/postex/client.js';
 import { toCharges, toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
@@ -89,6 +91,7 @@ interface Counts {
   unmatched: number;
   stockMoves: number;
   orderStates: number;
+  postings: number;
 }
 
 const emptyCounts = (): Counts => ({
@@ -108,6 +111,7 @@ const emptyCounts = (): Counts => ({
   unmatched: 0,
   stockMoves: 0,
   orderStates: 0,
+  postings: 0,
 });
 
 const hasHistory = (raw: unknown): boolean => {
@@ -215,7 +219,7 @@ const refreshDue = async (deps: PostexDeps, account: PostexAccountTarget, now: D
  * `postex:sync`: for each account, find new parcels, refresh the ones that are due, link
  * unmatched parcels to orders, then bring the stock of every parcel whose status or order link
  * changed (`stock_pending`, set in the same transaction as the change) in line with its history,
- * and re-derive its order's state. Stats are totals plus `<account>.<counter>`, and
+ * re-derive its order's state, and post whatever changed in money (`accounting_pending`). Stats are totals plus `<account>.<counter>`, and
  * `activeParcels`. Every write is an upsert or an insert that the unique keys dedupe, so a
  * second run adds no rows.
  */
@@ -234,6 +238,11 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
       counts.stockMoves += result.moves;
       // The same changes (a new status, a new link) are what move an order's state.
       if (result.orderId && (await recomputeOrderState(deps.sql, result.orderId)).changed) counts.orderStates++;
+    }
+    // After stock: COGS is the cost of the units the stock pass moved.
+    for (const id of await accountingPending(deps.sql, account.id)) {
+      const { actions } = await postShipmentAccounting(deps.sql, id);
+      counts.postings += Object.values(actions).filter((a) => a === 'posted' || a === 'reposted' || a === 'reversed').length;
     }
     for (const [key, value] of Object.entries(counts)) {
       stats[key] = (Number(stats[key]) || 0) + value;

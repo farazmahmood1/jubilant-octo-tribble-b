@@ -95,6 +95,8 @@ export const upsertCharges = async (db: Db, shipmentId: string, charges: Shipmen
     if (row?.inserted) totals.inserted++;
     if (row?.changed) totals.changed++;
   }
+  // A new or corrected charge changes the parcel's postings, even when its status did not move.
+  if (totals.changed > 0) await db`update shipments set accounting_pending = true where id = ${shipmentId} and not accounting_pending`;
   return totals;
 };
 
@@ -133,7 +135,8 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
       attempts_count = ${attempts.length},
       last_failure_reason = ${lastAttempt ? failureReason(lastAttempt.message) : null},
       flags = ${flags}::text[],
-      stock_pending = true
+      stock_pending = true,
+      accounting_pending = true
     where id = ${shipmentId}
       and (status_code, status_message, attempts_count, last_failure_reason, flags) is distinct from
           (${latest?.code ?? null}::text, ${latest?.message ?? null}::text, ${attempts.length}::int,
@@ -141,6 +144,14 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
     returning id
   `;
   return updated.length > 0;
+};
+
+/** Parcels, matched or not, whose postings the accounting pass has not yet brought in line. */
+export const accountingPending = async (db: Db, postexAccountId: string): Promise<string[]> => {
+  const rows = await db<{ id: string }[]>`
+    select id from shipments where postex_account_id = ${postexAccountId} and accounting_pending order by id
+  `;
+  return rows.map((r) => r.id);
 };
 
 /** Matched parcels whose stock the stock pass has not yet brought in line, oldest first. */

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
+import { postShipmentAccounting } from '../../domain/accounting.js';
 import { StockError, checkInReturn, recordAdjustment, returnsAwaitingCheckIn } from '../../domain/stock.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
@@ -50,6 +51,8 @@ export const stockRouter = (getSql: SqlProvider): Router => {
     const { shipmentId } = parse(shipmentParams, req.params);
     const body = parse(checkIn, req.body);
     const result = await checkInReturn(sql, shipmentId, body.outcome, await actorId(sql, sessionUser(req)), body.note).catch(asHttp);
+    // A damaged return is written off now rather than on the next sync.
+    await postShipmentAccounting(sql, shipmentId);
     res.json(result);
   });
 

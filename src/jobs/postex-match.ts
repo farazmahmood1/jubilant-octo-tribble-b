@@ -124,7 +124,7 @@ export const matchUnmatched = async (
 
     await atomically(sql, async (tx) => {
       await tx`
-        update shipments set order_id = ${match.orderId}, match_method = ${match.method}, match_confidence = ${match.confidence}, stock_pending = true
+        update shipments set order_id = ${match.orderId}, match_method = ${match.method}, match_confidence = ${match.confidence}, stock_pending = true, accounting_pending = true
         where id = ${parcel.id} and order_id is null
       `;
       await resolveOpenReviewItem(tx, unmatchedKey, `Matched by ${match.method}`);

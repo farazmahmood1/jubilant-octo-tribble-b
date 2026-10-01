@@ -1,5 +1,6 @@
 import { awaitingPayout, recordPayout } from '../db/repos/payouts.js';
 import { openReviewItem } from '../db/repos/review.js';
+import { postPayoutLine } from '../domain/accounting.js';
 import { toPayout } from '../integrations/postex/mapper.js';
 import { OVERNIGHT, type JobDefinition, type JobStats } from './runner.js';
 import { type PostexDeps, configuredPostexAccounts } from './postex.js';
@@ -14,14 +15,15 @@ export const PAYOUT_BATCH = 600;
 
 /**
  * `postex:payouts` (3.2 note S3): for each account, ask PostEx's payment status for delivered
- * parcels not yet on a payout, oldest first, and record the ones it has settled under a CPR.
+ * parcels not yet on a payout, oldest first, and record the ones it has settled under a CPR,
+ * posting each line to the journal (Bank / COD receivable).
  * A parcel PostEx has not settled is simply asked again next run. Idempotent: a parcel on a
  * payout is never selected again, and the payout is keyed on (account, CPR).
  */
 export const syncPayouts = async (deps: Omit<PostexDeps, 'tiers' | 'historyFrom'> & { batch?: number }): Promise<JobStats> => {
   const stats: JobStats = {};
   for (const account of deps.accounts) {
-    const counts = { checked: 0, paid: 0, unsettled: 0, settledWithoutCpr: 0, failed: 0 };
+    const counts = { checked: 0, paid: 0, posted: 0, unsettled: 0, settledWithoutCpr: 0, failed: 0 };
     const due = await awaitingPayout(deps.sql, account.id, deps.batch ?? PAYOUT_BATCH);
     for (const parcel of due) {
       if (deps.signal?.aborted) break;
@@ -50,7 +52,11 @@ export const syncPayouts = async (deps: Omit<PostexDeps, 'tiers' | 'historyFrom'
         });
         continue;
       }
-      if (await recordPayout(deps.sql, account.id, parcel.id, { ...payout, cprNumber })) counts.paid++;
+      if (await recordPayout(deps.sql, account.id, parcel.id, { ...payout, cprNumber })) {
+        counts.paid++;
+        const [line] = await deps.sql<{ id: string }[]>`select id from payout_lines where shipment_id = ${parcel.id}`;
+        if (line && (await postPayoutLine(deps.sql, line.id))?.created) counts.posted++;
+      }
     }
     // Every request failing is PostEx or the network, not a parcel: the run should say so.
     if (counts.checked > 0 && counts.failed === counts.checked) {

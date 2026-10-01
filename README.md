@@ -174,6 +174,33 @@ after a parcel's status or order link changes; every change is logged in `order_
 its reason. Until the Confirmation Desk exists, confirmation comes from Shopify tags
 (`confirmation_tags` setting; defaults `confirmed`, `on hold`/`hold`, `cancelled by customer`).
 
+## Accounting
+
+Double-entry, in `journal_entries` and `journal_lines` (migration `0007_accounting.sql`, one
+seeded chart for both brands with the brand on each line). The database refuses an entry whose
+debits and credits differ, at commit; entries are never edited, a correction is a reversal.
+`src/domain/accounting.ts` has the posting rules (Step 10 table, with notes S10–S13):
+
+- **Delivered** (the only place revenue is recognised): COD receivable / sales revenue and tax
+  payable, and the cost of the units that left: COGS (marketing for a PR order) / inventory.
+- **PostEx charges** post as PostEx reports them, delivered or not: delivery or return expense,
+  plus the 16% tax (expensed until the accountant says to claim it: `accounting` setting
+  `claimPostexInputTax`) / COD receivable. A corrected fee is reversed and re-posted.
+- **Returned after delivery**: the sale and COGS are reversed, dated by the return; both charges
+  stay. **Refused**, never delivered: there was no sale, so only the charges post.
+- **COD payout**: bank / COD receivable, per payout line. **Damaged return**: write-off / inventory.
+- Vendor bills and payments, consignment sales and partner payments have posting functions for
+  when their screens land.
+
+`postex:sync` posts whatever changed (`accounting_pending`, set in the same transaction as the
+change); `postex:payouts` posts each payout. A missing product cost opens a `cost_missing`
+item and holds that COGS back. `npm run accounting:replay` re-posts anything missing for every
+parcel and payout and prints the trial balance (exit 1 if it does not balance).
+
+**Month close.** `closePeriod()` closes a month from the 5th of the next one; after that the
+database refuses any entry dated in it, with the reason. Syncs date a late event on the first
+day of the next open month instead, saying so in the memo.
+
 ## Worker schedule
 
 Neon suspends its compute when nothing queries it, so the jobs are timed to wake it as rarely as
