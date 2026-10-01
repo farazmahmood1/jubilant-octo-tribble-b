@@ -14,6 +14,7 @@ import {
   upsertCharges,
   upsertShipment,
 } from '../db/repos/shipments.js';
+import { recomputeOrderState } from '../db/repos/order-state.js';
 import { atomically } from '../db/repos/upsert.js';
 import { reconcileShipmentStock } from '../domain/stock.js';
 import { postexClient } from '../integrations/postex/client.js';
@@ -87,6 +88,7 @@ interface Counts {
   suggested: number;
   unmatched: number;
   stockMoves: number;
+  orderStates: number;
 }
 
 const emptyCounts = (): Counts => ({
@@ -105,6 +107,7 @@ const emptyCounts = (): Counts => ({
   suggested: 0,
   unmatched: 0,
   stockMoves: 0,
+  orderStates: 0,
 });
 
 const hasHistory = (raw: unknown): boolean => {
@@ -211,7 +214,8 @@ const refreshDue = async (deps: PostexDeps, account: PostexAccountTarget, now: D
 /**
  * `postex:sync`: for each account, find new parcels, refresh the ones that are due, link
  * unmatched parcels to orders, then bring the stock of every parcel whose status or order link
- * changed (`stock_pending`, set in the same transaction as the change) in line with its history. Stats are totals plus `<account>.<counter>`, and
+ * changed (`stock_pending`, set in the same transaction as the change) in line with its history,
+ * and re-derive its order's state. Stats are totals plus `<account>.<counter>`, and
  * `activeParcels`. Every write is an upsert or an insert that the unique keys dedupe, so a
  * second run adds no rows.
  */
@@ -225,7 +229,12 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
     await refreshDue(deps, account, now, counts, reported);
     if (deps.signal?.aborted) break;
     await matchUnmatched(deps.sql, account, counts);
-    for (const id of await stockPending(deps.sql, account.id)) counts.stockMoves += (await reconcileShipmentStock(deps.sql, id)).moves;
+    for (const id of await stockPending(deps.sql, account.id)) {
+      const result = await reconcileShipmentStock(deps.sql, id);
+      counts.stockMoves += result.moves;
+      // The same changes (a new status, a new link) are what move an order's state.
+      if (result.orderId && (await recomputeOrderState(deps.sql, result.orderId)).changed) counts.orderStates++;
+    }
     for (const [key, value] of Object.entries(counts)) {
       stats[key] = (Number(stats[key]) || 0) + value;
       stats[`${account.key}.${key}`] = value;

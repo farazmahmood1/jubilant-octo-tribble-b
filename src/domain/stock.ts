@@ -163,6 +163,7 @@ export const targetFor = (state: OrderState, isPr: boolean): LocationKey => {
 
 export interface ReconcileResult {
   shipmentId: string;
+  orderId: string | null;
   /** Why nothing was looked at: the parcel has no order yet, so there are no lines to move. */
   skipped?: 'unmatched';
   target?: LocationKey;
@@ -209,7 +210,7 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
       for update of s
     `;
     if (!parcel) throw new StockError(`Shipment ${shipmentId} not found`);
-    if (!parcel.order_id) return { shipmentId, skipped: 'unmatched', moves: 0 };
+    if (!parcel.order_id) return { shipmentId, orderId: null, skipped: 'unmatched', moves: 0 };
 
     const stored = await tx<{ id: string; code: string; message: string; occurred_at: Date | null; created_at: Date }[]>`
       select id, code, message, occurred_at, created_at from shipment_events where shipment_id = ${shipmentId}
@@ -300,7 +301,7 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
         moves++;
     }
     await tx`update shipments set stock_pending = false where id = ${shipmentId} and stock_pending`;
-    return { shipmentId, target, moves };
+    return { shipmentId, orderId: parcel.order_id, target, moves };
   });
 
 /**

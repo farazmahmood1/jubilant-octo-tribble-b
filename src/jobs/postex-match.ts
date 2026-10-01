@@ -41,7 +41,7 @@ const settings = async (sql: Sql): Promise<MatchingSettings> => {
  * any whose number equals the parcel's reference wherever it falls. The matcher decides; this
  * only keeps it from reading the whole store.
  */
-const candidatesFor = async (
+export const candidatesFor = async (
   sql: Sql,
   storeId: string,
   parcel: { orderRef: string | null; bookedAt: Date | null },

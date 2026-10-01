@@ -4,6 +4,7 @@ import { upsertAddress, upsertCustomer } from '../db/repos/customers.js';
 import { getCursor, setCursor } from '../db/repos/cursors.js';
 import { type OrderUpsertResult, upsertOrder } from '../db/repos/orders.js';
 import { upsertProduct } from '../db/repos/products.js';
+import { recomputeOrderState } from '../db/repos/order-state.js';
 import { listOpenReviewItems, openReviewItem, resolveReviewItem } from '../db/repos/review.js';
 import { atomically } from '../db/repos/upsert.js';
 import { upsertVariant } from '../db/repos/variants.js';
@@ -213,7 +214,7 @@ export const storeOrderNode = async (
       const customer = await upsertCustomer(tx, { storeId: store.id, ...mapped.customer, shopifyOrderId: mapped.order.shopifyOrderId });
       const address = customer && mapped.address ? await upsertAddress(tx, customer.id, mapped.address) : null;
       const { updatedAt: _updatedAt, ...order } = mapped.order;
-      return upsertOrder(tx, {
+      const stored = await upsertOrder(tx, {
         storeId: store.id,
         ...order,
         customerId: customer?.id ?? null,
@@ -227,6 +228,9 @@ export const storeOrderNode = async (
           return { ...line, variantId };
         }),
       });
+      // A cancellation or a confirmation tag moves the order's state as soon as it is stored.
+      await recomputeOrderState(tx, stored.id);
+      return stored;
     });
     counts[result.action]++;
     if (result.changed) counts.changed++;

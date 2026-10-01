@@ -141,6 +141,39 @@ does, and `returnsAwaitingCheckIn()` lists the parcels PostEx has returned that 
 checked in. Counts and corrections go through `recordAdjustment()`, against the adjustment
 location, and are audited. Order lines with no catalogue variant cannot move and are queued.
 
+## Reconciliation queue
+
+`reconciliation:scan` (hourly) checks every parcel against the five Step 9 rules in
+`src/domain/reconciliation.ts` and keeps `reconciliation_items` equal to what they find:
+unmatched parcel, COD different from what the order should collect (nothing on a paid order),
+possible duplicate booking (two live parcels for one order), stuck in transit (no status change
+for `alerts.stuckDays`, default 7, Karachi days) and unknown PostEx status code. A re-run adds
+nothing; an item a person resolved or ignored is never reopened; an item whose condition clears
+is closed by the system. Every close is in `audit_log`.
+
+API (signed in): `GET /api/v1/reconciliation/items?status=&kind=&store=&before=&limit=`,
+`GET /api/v1/reconciliation/summary`, `POST .../items/:id/resolve` and `.../ignore` with a
+`note`, `GET .../items/:id/candidates` and `POST .../items/:id/link` with `orderId` or
+`orderNumber`. A link updates the parcel, closes its items, moves its stock and sets its order's
+state in one transaction.
+
+Stock API: `GET /api/v1/stock/returns-awaiting`, `POST /api/v1/stock/returns/:shipmentId/check-in`
+(`restocked` or `damaged`), `GET /api/v1/stock/locations`, `GET /api/v1/stock/quants`,
+`GET /api/v1/stock/variants?search=`, `POST /api/v1/stock/adjustments`.
+
+**Matching prefixes.** `npm run match:report` prints, per PostEx account, the match rate against
+the 4.6% target, any unmatched parcel without a queue row, and every order-number prefix seen on
+parcels, marking the ones the `matching` setting does not accept yet. Set them with
+`PUT /api/v1/settings/matching` (`{"refPrefixes": {"nur": ["NBJ"], "organics": []}}`) or from the
+dashboard's Reconciliation page; the next `postex:sync` re-tries every unmatched parcel.
+
+## Order state
+
+`orders.state` is written only by `recomputeOrderState()`, after a Shopify order is stored and
+after a parcel's status or order link changes; every change is logged in `order_state_log` with
+its reason. Until the Confirmation Desk exists, confirmation comes from Shopify tags
+(`confirmation_tags` setting; defaults `confirmed`, `on hold`/`hold`, `cancelled by customer`).
+
 ## Worker schedule
 
 Neon suspends its compute when nothing queries it, so the jobs are timed to wake it as rarely as

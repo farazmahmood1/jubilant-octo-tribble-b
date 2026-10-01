@@ -23,7 +23,8 @@
     "job": "tsx src/scripts/job.ts",
     "dev:worker": "tsx watch src/index.worker.ts",
     "start:worker": "node dist/index.worker.js",
-    "postex:totals": "tsx src/scripts/postex-totals.ts"
+    "postex:totals": "tsx src/scripts/postex-totals.ts",
+    "match:report": "tsx src/scripts/match-report.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

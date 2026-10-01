@@ -171,6 +171,15 @@ describe('shopify:orders', { skip: skipWithoutDb }, () => {
     assert.equal(pr?.channel, 'pr');
   });
 
+  it('writes each stored order\'s derived state, and logs it once', async () => {
+    const [unset] = await s.schema.sql<{ n: number }[]>`select count(*)::int as n from orders where state is null`;
+    assert.equal(unset?.n, 0);
+    const [pr] = await s.schema.sql<{ state: string }[]>`select state from orders where store_id = ${s.nur} and order_number = '#1003'`;
+    assert.equal(pr?.state, 'pr');
+    const [logs] = await s.schema.sql<{ orders: number; rows: number }[]>`select count(*)::int as rows, count(distinct order_id)::int as orders from order_state_log`;
+    assert.equal(logs?.rows, logs?.orders);
+  });
+
   it('a second run inserts zero rows: it re-reads only from the cursor, and changes nothing', async () => {
     const callsBefore = nur.calls.length;
     const stats = await syncOrders(deps(s, nur, organics));
