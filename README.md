@@ -171,8 +171,12 @@ dashboard's Reconciliation page; the next `postex:sync` re-tries every unmatched
 
 `orders.state` is written only by `recomputeOrderState()`, after a Shopify order is stored and
 after a parcel's status or order link changes; every change is logged in `order_state_log` with
-its reason. Until the Confirmation Desk exists, confirmation comes from Shopify tags
-(`confirmation_tags` setting; defaults `confirmed`, `on hold`/`hold`, `cancelled by customer`).
+its reason. Until the Confirmation Desk exists, confirmation comes from the Shopify tags the
+team uses, compared by their words (emoji and case ignored): `Order Confirmed`; `Order
+Canceled`; `Confirmation Pending`; `didnt answer the call`, `call not attended`, `didnt confirm`
+(no answer); `number off`, `No Phone`, `NO WhatsApp` (unreachable). "On hold" is Shopify's own
+fulfillment status, not a tag. Change the list with `GET|PUT /api/v1/settings/confirmation-tags`,
+then run `npm run orders:states` to re-derive every order.
 
 ## Accounting
 
@@ -197,9 +201,19 @@ change); `postex:payouts` posts each payout. A missing product cost opens a `cos
 item and holds that COGS back. `npm run accounting:replay` re-posts anything missing for every
 parcel and payout and prints the trial balance (exit 1 if it does not balance).
 
-**Month close.** `closePeriod()` closes a month from the 5th of the next one; after that the
-database refuses any entry dated in it, with the reason. Syncs date a late event on the first
-day of the next open month instead, saying so in the memo.
+**Month close.** `closePeriod()` closes a month from the 5th of the next one, in order (an
+earlier month with entries must be closed first); after that the database refuses any entry
+dated in it, with the reason. Syncs date a late event on the first day of the next open month
+instead, saying so in the memo.
+
+**Opening balances.** Entered on the balance-sheet accounts as at one date; whatever does not
+balance is the owner's opening equity (3100), so a partial list still posts and the gap shows.
+Re-entering them reverses the earlier entry while that month is open.
+
+API (signed in; amounts are integer paisa in strings): `GET /api/v1/accounting/trial-balance?to=&store=`,
+`GET /api/v1/accounting/accounts/:code/lines`, `GET /api/v1/accounting/periods`,
+`POST /api/v1/accounting/periods/:year/:month/close`, `GET|PUT /api/v1/accounting/opening-balances`.
+The dashboard's Accounting page uses them.
 
 ## Worker schedule
 

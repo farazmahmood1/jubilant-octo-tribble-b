@@ -42,6 +42,8 @@ export const ACCOUNT_CODES = {
   inputTax: '1400',
   payable: '2000',
   salesTaxPayable: '2100',
+  equity: '3000',
+  openingBalances: '3100',
   revenue: '4000',
   cogs: '5000',
   deliveryExpense: '6000',
@@ -579,7 +581,7 @@ export const postPartnerPayment = (db: Db, p: { paymentId: string; partnerId: st
 
 /**
  * Closes a Karachi month. Allowed from the 5th of the following month (proposal 6.5 step 6),
- * once; audited. After this the database refuses any entry dated in that month.
+ * once, and only when every earlier month with entries is closed; audited. After this the database refuses any entry dated in that month.
  */
 export const closePeriod = async (db: Db, input: { year: number; month: number; actorId: string; now?: Date }): Promise<void> =>
   atomically(db, async (tx) => {
@@ -591,6 +593,18 @@ export const closePeriod = async (db: Db, input: { year: number; month: number; 
     if (karachiDay(now) < earliest) throw new AccountingError(`Period ${label} can be closed from ${earliest}, not before`);
     const [row] = await tx<{ status: string }[]>`select status from fiscal_periods where year = ${input.year} and month = ${input.month} for update`;
     if (row?.status === 'closed') throw new AccountingError(`Period ${label} is already closed`);
+    // Months close in order: a closed month with an open one before it would let entries land
+    // behind a close.
+    const [earlier] = await tx<{ month: string }[]>`
+      select to_char(e.entry_date, 'YYYY-MM') as month from journal_entries e
+      where e.entry_date < make_date(${input.year}, ${input.month}, 1)
+        and not exists (
+          select 1 from fiscal_periods p
+          where p.year = extract(year from e.entry_date) and p.month = extract(month from e.entry_date) and p.status = 'closed'
+        )
+      order by e.entry_date limit 1
+    `;
+    if (earlier) throw new AccountingError(`Close ${earlier.month} first: months close in order`);
     await tx`
       insert into fiscal_periods (year, month, status, closed_at, closed_by) values (${input.year}, ${input.month}, 'closed', ${now}, ${input.actorId})
       on conflict (year, month) do update set status = 'closed', closed_at = excluded.closed_at, closed_by = excluded.closed_by
@@ -647,4 +661,133 @@ export const replayAccounting = async (sql: Sql): Promise<{ shipments: number; p
   let payoutLinesPosted = 0;
   for (const { id } of lines) if ((await postPayoutLine(sql, id))?.created) payoutLinesPosted++;
   return { shipments: shipments.length, postings, payoutLines: payoutLinesPosted };
+};
+
+// ---- Opening balances ----
+
+export const OPENING_SOURCE: Source = { type: 'opening_balance', id: 'opening' };
+
+/** Accounts an opening balance can be entered on: the balance sheet. P&L accounts start at zero. */
+export const BALANCE_SHEET_KEYS: readonly AccountKey[] = [
+  'bank', 'codReceivable', 'customerReceivable', 'partnerReceivable', 'inventory', 'inputTax', 'payable', 'salesTaxPayable', 'equity',
+];
+
+export interface OpeningLine {
+  account: AccountKey;
+  /** Positive is a debit balance (assets), negative a credit balance (liabilities, equity). */
+  balance: Paisa;
+  storeId?: string | null;
+}
+
+/**
+ * The client's opening balances as one entry dated the day before the system takes over. Any
+ * difference between the debit and credit balances entered is the owner's opening equity, posted
+ * to 3100 Opening balances, so the entry always balances and the gap is visible, not lost.
+ * Entering them again replaces the earlier entry by a reversal, while that month is open.
+ */
+export const openingBalanceLines = (lines: readonly OpeningLine[]): Line[] => {
+  const entered = lines.map((l): Line => ({ account: l.account, debit: l.balance, storeId: l.storeId ?? null }));
+  const net = sum(lines.map((l) => l.balance));
+  return normalise([...entered, { account: 'openingBalances', credit: net }]);
+};
+
+export const postOpeningBalances = async (
+  db: Db,
+  input: { date: string; lines: readonly OpeningLine[]; actorId: string },
+): Promise<{ id: string; replaced: boolean } | null> =>
+  atomically(db, async (tx) => {
+    for (const line of input.lines) {
+      if (!BALANCE_SHEET_KEYS.includes(line.account)) throw new AccountingError(`Opening balances go on balance-sheet accounts, not ${ACCOUNT_CODES[line.account]}`);
+    }
+    const wanted = openingBalanceLines(input.lines);
+    const live = await liveEntry(tx, OPENING_SOURCE);
+    if (live && sameLines(live.lines, wanted)) return { id: live.id, replaced: false };
+    if (live) await reverseEntry(tx, live.id, { date: input.date, memo: 'Opening balances re-entered', postedBy: input.actorId });
+    const posted = await postEntry(tx, { date: input.date, memo: 'Opening balances', source: OPENING_SOURCE, lines: wanted, postedBy: input.actorId });
+    await tx`
+      insert into audit_log (actor_id, action, entity, entity_id, before, after)
+      values (${input.actorId}, 'accounting.opening_balances', 'journal_entries', ${posted?.id ?? null},
+              ${live ? tx.json({ entryId: live.id }) : null},
+              ${tx.json({ date: input.date, lines: input.lines.map((l) => ({ account: ACCOUNT_CODES[l.account], balance: l.balance.toString(), storeId: l.storeId ?? null })) })})
+    `;
+    return posted ? { id: posted.id, replaced: live !== null } : null;
+  });
+
+export const openingBalances = async (db: Db): Promise<{ date: string; lines: OpeningLine[] } | null> => {
+  const live = await liveEntry(db, OPENING_SOURCE);
+  if (!live) return null;
+  const [entry] = await db<{ entry_date: string }[]>`select entry_date::text from journal_entries where id = ${live.id}`;
+  return {
+    date: entry!.entry_date,
+    lines: live.lines
+      .filter((l) => l.account !== 'openingBalances')
+      .map((l) => ({ account: l.account, balance: l.debit ?? paisa(-(l.credit ?? ZERO)), storeId: l.storeId ?? null })),
+  };
+};
+
+// ---- Periods and ledgers for the screens ----
+
+export interface PeriodView {
+  year: number;
+  month: number;
+  status: 'open' | 'closed';
+  closedAt: Date | null;
+  closedBy: string | null;
+  entries: number;
+  /** The first Karachi day it may be closed: the 5th of the next month. */
+  closableFrom: string;
+}
+
+const closableFrom = (year: number, month: number): string =>
+  `${month === 12 ? year + 1 : year}-${String(month === 12 ? 1 : month + 1).padStart(2, '0')}-05`;
+
+/** Every month from the first entry (or this month) to this month, newest first. */
+export const listPeriods = async (db: Db, now: Date = new Date()): Promise<PeriodView[]> => {
+  const rows = await db<{ year: number; month: number; status: 'open' | 'closed'; closed_at: Date | null; closed_by: string | null; entries: number }[]>`
+    with bounds as (
+      select date_trunc('month', least(coalesce(min(entry_date), ${karachiDay(now)}::date), ${karachiDay(now)}::date)) as first_month
+      from journal_entries
+    ),
+    months as (
+      select generate_series((select first_month from bounds), date_trunc('month', ${karachiDay(now)}::date), interval '1 month')::date as m
+    )
+    select extract(year from m)::int as year, extract(month from m)::int as month,
+           coalesce(p.status, 'open') as status, p.closed_at, u.email as closed_by,
+           (select count(*)::int from journal_entries e where date_trunc('month', e.entry_date) = m) as entries
+    from months
+    left join fiscal_periods p on p.year = extract(year from m) and p.month = extract(month from m)
+    left join users u on u.id = p.closed_by
+    order by m desc
+  `;
+  return rows.map((r) => ({ year: r.year, month: r.month, status: r.status, closedAt: r.closed_at, closedBy: r.closed_by, entries: r.entries, closableFrom: closableFrom(r.year, r.month) }));
+};
+
+export interface LedgerLine {
+  entryId: string;
+  date: string;
+  memo: string;
+  sourceType: string;
+  sourceId: string;
+  storeId: string | null;
+  debit: Paisa;
+  credit: Paisa;
+  reversed: boolean;
+}
+
+/** One account's lines, newest first: what a trial balance figure is made of. */
+export const accountLedger = async (db: Db, code: string, options: { to?: string; storeId?: string; limit?: number } = {}): Promise<LedgerLine[]> => {
+  const rows = await db<{ entry_id: string; date: string; memo: string; source_type: string; source_id: string; store_id: string | null; debit: string; credit: string; reversed: boolean }[]>`
+    select e.id as entry_id, e.entry_date::text as date, e.memo, e.source_type, e.source_id, l.store_id,
+           l.debit_paisa::text as debit, l.credit_paisa::text as credit, e.reversed_by is not null as reversed
+    from journal_lines l join journal_entries e on e.id = l.entry_id join accounts a on a.id = l.account_id
+    where a.code = ${code}
+      ${options.to ? db`and e.entry_date <= ${options.to}::date` : db``}
+      ${options.storeId ? db`and l.store_id = ${options.storeId}` : db``}
+    order by e.entry_date desc, e.id desc
+    limit ${options.limit ?? 200}
+  `;
+  return rows.map((r) => ({
+    entryId: r.entry_id, date: r.date, memo: r.memo, sourceType: r.source_type, sourceId: r.source_id, storeId: r.store_id,
+    debit: readPaisa(r.debit), credit: readPaisa(r.credit), reversed: r.reversed,
+  }));
 };

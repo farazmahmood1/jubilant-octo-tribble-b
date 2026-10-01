@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
+import { type ConfirmationTags, DEFAULT_CONFIRMATION_TAGS } from '../../db/repos/order-state.js';
 import { atomically } from '../../db/repos/upsert.js';
 import { DEFAULT_WINDOW_DAYS } from '../../domain/matching.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
@@ -20,6 +21,9 @@ const matching = z.object({
 });
 
 export type MatchingSetting = z.infer<typeof matching>;
+
+const tagList = z.array(z.string().trim().min(1).max(80)).max(30);
+const confirmationTags = z.object({ confirmed: tagList, cancelled: tagList, pending: tagList, noAnswer: tagList, unreachable: tagList });
 
 export const settingsRouter = (getSql: SqlProvider): Router => {
   const router = Router();
@@ -46,6 +50,31 @@ export const settingsRouter = (getSql: SqlProvider): Router => {
       `;
     });
     res.json({ matching: value });
+  });
+
+  /** Which Shopify tags mean which confirmation outcome (S7). Run `npm run orders:states` after a change. */
+  router.get('/settings/confirmation-tags', async (_req, res) => {
+    const sql = requireSql(getSql);
+    const [row] = await sql<{ value: Partial<ConfirmationTags> }[]>`select value from app_settings where key = 'confirmation_tags'`;
+    res.json({ confirmationTags: { ...DEFAULT_CONFIRMATION_TAGS, ...(row?.value ?? {}) } });
+  });
+
+  router.put('/settings/confirmation-tags', async (req, res) => {
+    const sql = requireSql(getSql);
+    const value = parse(confirmationTags, req.body);
+    const actor = await actorId(sql, sessionUser(req));
+    await atomically(sql, async (tx) => {
+      const [before] = await tx<{ value: unknown }[]>`select value from app_settings where key = 'confirmation_tags' for update`;
+      await tx`
+        insert into app_settings (key, value) values ('confirmation_tags', ${tx.json(value)})
+        on conflict (key) do update set value = excluded.value
+      `;
+      await tx`
+        insert into audit_log (actor_id, action, entity, entity_id, before, after)
+        values (${actor}, 'settings.update', 'app_settings', 'confirmation_tags', ${before ? tx.json(before.value as never) : null}, ${tx.json(value)})
+      `;
+    });
+    res.json({ confirmationTags: value });
   });
 
   return router;

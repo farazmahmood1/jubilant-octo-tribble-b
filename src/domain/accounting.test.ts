@@ -19,6 +19,7 @@ import {
   cogsLines,
   consignmentSaleLines,
   forwardChargeLines,
+  openingBalanceLines,
   partnerPaymentLines,
   payoutLines,
   postConsignmentSale,
@@ -43,7 +44,7 @@ const p = (rupees: number): Paisa => paisa(BigInt(rupees) * 100n);
 const pairs = (lines: readonly Line[]): string[] => {
   const codes: Record<string, string> = {
     bank: '1000', codReceivable: '1100', customerReceivable: '1150', partnerReceivable: '1200', inventory: '1300', inputTax: '1400',
-    payable: '2000', salesTaxPayable: '2100', revenue: '4000', cogs: '5000', deliveryExpense: '6000', returnExpense: '6010',
+    payable: '2000', salesTaxPayable: '2100', equity: '3000', openingBalances: '3100', revenue: '4000', cogs: '5000', deliveryExpense: '6000', returnExpense: '6010',
     postexTax: '6020', marketing: '6100', writeOff: '6200', general: '6900',
   };
   return lines.map((l) => (l.debit ? `Dr ${codes[l.account]} ${l.debit}` : `Cr ${codes[l.account]} ${l.credit}`)).sort();
@@ -89,6 +90,15 @@ describe('posting rules: the exact debit and credit pairs (Step 10 table)', () =
       'Cr 2000 1210000', 'Dr 1300 1000000', 'Dr 1400 160000', 'Dr 6900 50000',
     ]);
     assert.deepEqual(pairs(vendorPaymentLines({ vendorId: '3', amount: p(12_100) })), ['Cr 1000 1210000', 'Dr 2000 1210000']);
+  });
+
+  it('opening balances: entered balances, with the difference as opening equity (3100)', () => {
+    assert.deepEqual(
+      pairs(openingBalanceLines([{ account: 'bank', balance: p(5000) }, { account: 'inventory', balance: p(12_000) }, { account: 'payable', balance: paisa(-300_000n) }])),
+      ['Cr 2000 300000', 'Cr 3100 1400000', 'Dr 1000 500000', 'Dr 1300 1200000'],
+    );
+    // Entered balances that already balance need no equity line.
+    assert.deepEqual(pairs(openingBalanceLines([{ account: 'bank', balance: p(100) }, { account: 'equity', balance: paisa(-10_000n) }])), ['Cr 3000 10000', 'Dr 1000 10000']);
   });
 
   it('consignment sale and partner payment: partner receivable / revenue, tax; bank / partner receivable', () => {
@@ -342,6 +352,12 @@ describe('the journal in the database', { skip: skipWithoutDb }, () => {
 
   it('posting into a closed period fails with a clear error; syncs roll forward to the next open month', async () => {
     await assert.rejects(closePeriod(s.schema.sql, { year: 2026, month: 8, actorId: actor, now: new Date('2026-09-04T10:00:00Z') }), /can be closed from 2026-09-05, not before/);
+    await postEntry(s.schema.sql, { date: '2026-07-15', memo: 'July', source: { type: 'test', id: 'july' }, lines: payoutLines({ storeId: s.nur, postexAccountId: accountId, amount: p(1) }) });
+    await assert.rejects(
+      closePeriod(s.schema.sql, { year: 2026, month: 8, actorId: actor, now: new Date('2026-09-05T10:00:00Z') }),
+      /Close 2026-07 first: months close in order/,
+    );
+    await closePeriod(s.schema.sql, { year: 2026, month: 7, actorId: actor, now: new Date('2026-09-05T10:00:00Z') });
     await closePeriod(s.schema.sql, { year: 2026, month: 8, actorId: actor, now: new Date('2026-09-05T10:00:00Z') });
     await assert.rejects(closePeriod(s.schema.sql, { year: 2026, month: 8, actorId: actor, now: new Date('2026-09-06T10:00:00Z') }), /already closed/);
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import type { SqlProvider } from '../middleware/database.js';
 import { requireAuth } from '../middleware/require-auth.js';
+import { accountingRouter } from './accounting.js';
 import { authRouter } from './auth.js';
 import { healthRouter } from './health.js';
 import { integrationsRouter } from './integrations.js';
@@ -22,5 +23,6 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(reconciliationRouter(getSql));
   apiRouter.use(stockRouter(getSql));
   apiRouter.use(settingsRouter(getSql));
+  apiRouter.use(accountingRouter(getSql));
   return apiRouter;
 };

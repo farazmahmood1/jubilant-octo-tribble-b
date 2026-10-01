@@ -25,7 +25,8 @@
     "start:worker": "node dist/index.worker.js",
     "postex:totals": "tsx src/scripts/postex-totals.ts",
     "match:report": "tsx src/scripts/match-report.ts",
-    "accounting:replay": "tsx src/scripts/accounting-replay.ts"
+    "accounting:replay": "tsx src/scripts/accounting-replay.ts",
+    "orders:states": "tsx src/scripts/order-states.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
