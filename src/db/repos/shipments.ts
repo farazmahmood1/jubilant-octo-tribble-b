@@ -101,7 +101,7 @@ export const upsertCharges = async (db: Db, shipmentId: string, charges: Shipmen
 /**
  * Recomputes a parcel's status, attempt count, last failure reason and history flags from every
  * event stored for it, replayed in the same canonical order the order state machine uses. Returns
- * whether anything changed.
+ * whether anything changed; a change also marks the parcel's stock for the stock pass.
  */
 export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolean> => {
   const stored = await db<{ code: string; message: string; occurred_at: Date | null }[]>`
@@ -132,7 +132,8 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
       status_message = ${latest?.message ?? null},
       attempts_count = ${attempts.length},
       last_failure_reason = ${lastAttempt ? failureReason(lastAttempt.message) : null},
-      flags = ${flags}::text[]
+      flags = ${flags}::text[],
+      stock_pending = true
     where id = ${shipmentId}
       and (status_code, status_message, attempts_count, last_failure_reason, flags) is distinct from
           (${latest?.code ?? null}::text, ${latest?.message ?? null}::text, ${attempts.length}::int,
@@ -140,6 +141,14 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
     returning id
   `;
   return updated.length > 0;
+};
+
+/** Matched parcels whose stock the stock pass has not yet brought in line, oldest first. */
+export const stockPending = async (db: Db, postexAccountId: string): Promise<string[]> => {
+  const rows = await db<{ id: string }[]>`
+    select id from shipments where postex_account_id = ${postexAccountId} and stock_pending and order_id is not null order by id
+  `;
+  return rows.map((r) => r.id);
 };
 
 export const markSynced = async (db: Db, shipmentIds: string[], at: Date): Promise<void> => {
@@ -205,6 +214,20 @@ export const dueForRefresh = async (
     order by last_synced_at nulls first, id
   `;
   return rows.map((r) => ({ id: r.id, trackingNumber: r.tracking_number }));
+};
+
+/**
+ * Open parcels out for delivery or with a failed attempt, across the given accounts: the ones
+ * the 5-minute refresh tier exists for. Zero lets the sync drop back to every 15 minutes.
+ */
+export const activeParcels = async (db: Db, postexAccountIds: string[]): Promise<number> => {
+  const [row] = await db<{ n: number }[]>`
+    select count(*)::int as n from shipments
+    where postex_account_id = any(${postexAccountIds}::bigint[])
+      and (status_code is null or not (status_code = any(${[...TERMINAL_CODES]}::text[])))
+      and (status_code = '0013' or status_label ilike '%out for delivery%')
+  `;
+  return row?.n ?? 0;
 };
 
 export interface PostexTotals {

@@ -2,7 +2,7 @@ import type { PostexAccountConfig } from '../../config.js';
 import { config } from '../../config.js';
 import { logger } from '../../logger.js';
 
-import type { PostexParcel, PostexPaymentStatus, PostexShipperAdvice, PostexStatusId } from './types.js';
+import type { PostexParcel, PostexPaymentStatus, PostexStatusId } from './types.js';
 
 const BASE_URL = 'https://api.postex.pk/services/integration/api/order';
 const REQUEST_TIMEOUT_MS = 45_000;
@@ -33,7 +33,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Read-only PostEx client.
  *
- * It deliberately exposes no way to book, cancel or advise on a parcel: PostEx has no sandbox,
+ * It deliberately exposes no way to book, cancel or advise on a parcel, and no call to the
+ * shipper advice endpoints at all, not even the read (CLAUDE.md rule 1). PostEx has no sandbox,
  * so any write would touch real shipments and real money. When booking is added later it must
  * go behind `config.postex.allowWrites` and the idempotency rules (unique reference written
  * before the call, never retry a timed-out create).
@@ -78,11 +79,6 @@ export class PostexClient {
 
   async paymentStatus(trackingNumber: string): Promise<PostexPaymentStatus> {
     return this.get<PostexPaymentStatus>(`/v1/payment-status/${encodeURIComponent(trackingNumber)}`);
-  }
-
-  async shipperAdvice(trackingNumber: string): Promise<PostexShipperAdvice[]> {
-    const dist = await this.get<unknown>(`/v1/get-shipper-advice/${encodeURIComponent(trackingNumber)}`);
-    return Array.isArray(dist) ? (dist as PostexShipperAdvice[]) : [];
   }
 
   private async get<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {

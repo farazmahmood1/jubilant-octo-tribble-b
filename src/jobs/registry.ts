@@ -1,4 +1,5 @@
 import { postexJob } from './postex.js';
+import { payoutsJob } from './postex-payouts.js';
 import type { JobDefinition } from './runner.js';
 import { shopifyJobs } from './shopify.js';
 import { catchupJob } from './shopify-catchup.js';
@@ -11,7 +12,7 @@ export const jobs: JobDefinition[] = [
   {
     name: 'system.heartbeat',
     // Hourly: often enough to see the worker is alive, rare enough not to keep Neon awake (risk R3).
-    schedule: { everyMs: 60 * 60 * 1000 },
+    schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
     handler: async ({ sql }) => {
       const startedAt = Date.now();
       await sql`select 1`;
@@ -21,4 +22,5 @@ export const jobs: JobDefinition[] = [
   ...shopifyJobs,
   catchupJob,
   postexJob,
+  payoutsJob,
 ];

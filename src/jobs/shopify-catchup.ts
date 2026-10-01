@@ -1,5 +1,5 @@
 import { processPendingWebhooks } from '../webhooks/shopify.js';
-import type { JobDefinition, JobStats } from './runner.js';
+import { type JobDefinition, type JobStats, OVERNIGHT } from './runner.js';
 import { type Counts, type SyncDeps, configuredStores, flatten, retrySkippedOrders, syncOrders } from './shopify.js';
 
 export const CATCHUP_JOB = 'shopify:catchup';
@@ -32,6 +32,7 @@ export const catchUp = async (deps: SyncDeps): Promise<JobStats> => {
 
 export const catchupJob: JobDefinition = {
   name: CATCHUP_JOB,
-  schedule: { everyMs: 15 * 60 * 1000 },
+  // On the quarter hour with postex:sync, so the two wake the database together; hourly overnight.
+  schedule: { everyMs: 15 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT },
   handler: async ({ sql, logger, signal }) => catchUp({ sql, logger, signal, stores: await configuredStores(sql) }),
 };

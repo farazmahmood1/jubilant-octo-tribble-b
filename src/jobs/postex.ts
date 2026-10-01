@@ -4,6 +4,8 @@ import { getCursor, setCursor } from '../db/repos/cursors.js';
 import { openReviewItem } from '../db/repos/review.js';
 import {
   DEFAULT_TIERS,
+  activeParcels,
+  stockPending,
   type RefreshTiers,
   dueForRefresh,
   insertEvents,
@@ -13,21 +15,24 @@ import {
   upsertShipment,
 } from '../db/repos/shipments.js';
 import { atomically } from '../db/repos/upsert.js';
+import { reconcileShipmentStock } from '../domain/stock.js';
 import { postexClient } from '../integrations/postex/client.js';
 import { toCharges, toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
 import { formatKarachi } from '../lib/time.js';
 import type { Logger } from '../logger.js';
-import type { JobDefinition, JobStats } from './runner.js';
+import { matchUnmatched } from './postex-match.js';
+import { type JobContext, type JobDefinition, type JobStats, OVERNIGHT } from './runner.js';
 
 export const POSTEX_JOB = 'postex:sync';
 
 /**
- * The two read calls the sync makes. `PostexClient` satisfies this; tests pass a fake. There is
+ * The read calls the PostEx jobs make. `PostexClient` satisfies this; tests pass a fake. There is
  * deliberately nothing here that books, cancels or advises on a parcel (CLAUDE.md rule 1).
  */
 export interface PostexSource {
   listOrders(params: { from: string; to: string }): Promise<unknown[]>;
   trackBulk(trackingNumbers: string[]): Promise<unknown[]>;
+  paymentStatus(trackingNumber: string): Promise<unknown>;
 }
 
 export interface PostexAccountTarget {
@@ -78,6 +83,10 @@ interface Counts {
   skipped: number;
   notReturned: number;
   unknownCodes: number;
+  matched: number;
+  suggested: number;
+  unmatched: number;
+  stockMoves: number;
 }
 
 const emptyCounts = (): Counts => ({
@@ -92,6 +101,10 @@ const emptyCounts = (): Counts => ({
   skipped: 0,
   notReturned: 0,
   unknownCodes: 0,
+  matched: 0,
+  suggested: 0,
+  unmatched: 0,
+  stockMoves: 0,
 });
 
 const hasHistory = (raw: unknown): boolean => {
@@ -196,9 +209,11 @@ const refreshDue = async (deps: PostexDeps, account: PostexAccountTarget, now: D
 };
 
 /**
- * `postex:sync`: for each account, find new parcels, then refresh the ones that are due. Stats
- * are totals plus `<account>.<counter>`. Every write is an upsert or an insert that the unique
- * keys dedupe, so a second run adds no rows.
+ * `postex:sync`: for each account, find new parcels, refresh the ones that are due, link
+ * unmatched parcels to orders, then bring the stock of every parcel whose status or order link
+ * changed (`stock_pending`, set in the same transaction as the change) in line with its history. Stats are totals plus `<account>.<counter>`, and
+ * `activeParcels`. Every write is an upsert or an insert that the unique keys dedupe, so a
+ * second run adds no rows.
  */
 export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
   const now = (deps.now ?? (() => new Date()))();
@@ -208,11 +223,15 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
     const reported = new Set<string>();
     await listNew(deps, account, now, counts, reported);
     await refreshDue(deps, account, now, counts, reported);
+    if (deps.signal?.aborted) break;
+    await matchUnmatched(deps.sql, account, counts);
+    for (const id of await stockPending(deps.sql, account.id)) counts.stockMoves += (await reconcileShipmentStock(deps.sql, id)).moves;
     for (const [key, value] of Object.entries(counts)) {
       stats[key] = (Number(stats[key]) || 0) + value;
       stats[`${account.key}.${key}`] = value;
     }
   }
+  stats['activeParcels'] = await activeParcels(deps.sql, deps.accounts.map((a) => a.id));
   return stats;
 };
 
@@ -225,15 +244,37 @@ export const configuredPostexAccounts = async (sql: Sql): Promise<PostexAccountT
     const row = rows.find((r) => r.key === account.key);
     if (!row) return [];
     const client = postexClient(account.key);
-    return [{ key: account.key, id: row.id, source: { listOrders: (p) => client.listOrders(p), trackBulk: (n) => client.trackBulk(n) } }];
+    return [
+      {
+        key: account.key,
+        id: row.id,
+        source: { listOrders: (p) => client.listOrders(p), trackBulk: (n) => client.trackBulk(n), paymentStatus: (n) => client.paymentStatus(n) },
+      },
+    ];
   });
   if (targets.length === 0) throw new Error('No PostEx account is ready to sync: set its token, and seed the postex_accounts table');
   return targets;
 };
 
+/** Polled this often while any parcel is out for delivery or has a failed attempt. */
+export const ACTIVE_EVERY_MS = 5 * 60 * 1000;
+
+/** One scheduled run: the sync, then a request for 5 minutes only if a parcel is active. */
+export const runPostexSync = async (
+  { sql, logger, signal, runAgainIn }: Pick<JobContext, 'sql' | 'logger' | 'signal' | 'runAgainIn'>,
+  accounts: PostexAccountTarget[],
+  now?: () => Date,
+): Promise<JobStats> => {
+  const stats = await syncPostex({ sql, logger, signal, accounts, ...(now ? { now } : {}) });
+  if (Number(stats['activeParcels']) > 0) runAgainIn(ACTIVE_EVERY_MS);
+  return stats;
+};
+
 export const postexJob: JobDefinition = {
   name: POSTEX_JOB,
-  // The fastest tier (out for delivery) is five minutes; the run itself decides what is due.
-  schedule: { everyMs: 5 * 60 * 1000 },
-  handler: async ({ sql, logger, signal }) => syncPostex({ sql, logger, signal, accounts: await configuredPostexAccounts(sql) }),
+  // Every 15 minutes on the quarter hour, with shopify:catchup, so the database wakes once for
+  // both (risk R3). Only while a parcel is out for delivery does the run ask for 5 minutes, the
+  // fastest refresh tier; overnight in Karachi it is hourly regardless (note S4).
+  schedule: { everyMs: LIST_EVERY_MS, alignToClock: true, quiet: OVERNIGHT },
+  handler: async (ctx) => runPostexSync(ctx, await configuredPostexAccounts(ctx.sql)),
 };

@@ -1,4 +1,5 @@
 import type { Sql } from '../db.js';
+import { formatKarachi } from '../lib/time.js';
 import type { Logger } from '../logger.js';
 
 /** Counters a job reports: rows seen, inserted, changed, parcels polled, and so on. */
@@ -15,6 +16,29 @@ export interface JobContext {
   /** Aborted when the worker is shutting down; long jobs should check it between batches. */
   signal: AbortSignal;
   runId: string;
+  /**
+   * Asks for the next run sooner (or later) than `schedule.everyMs`, e.g. every 5 minutes only
+   * while parcels are out for delivery. Quiet hours still apply on top.
+   */
+  runAgainIn: (ms: number) => void;
+}
+
+export interface JobSchedule {
+  /** Time from the end of one run to the start of the next. */
+  everyMs: number;
+  /** Run as soon as the scheduler starts instead of waiting one interval. Default true. */
+  runOnStart?: boolean;
+  /**
+   * Start runs on multiples of the interval (:00, :15, :30, :45 for 15 minutes) instead of
+   * `everyMs` after the last one. Jobs that share an interval then wake the database together,
+   * so it can sleep in between (risk R3).
+   */
+  alignToClock?: boolean;
+  /**
+   * Overnight in Karachi, run at most this often. `fromHour` to `toHour` may wrap midnight
+   * (23 to 8). Keeps Neon's scale-to-zero compute within budget (proposal §10).
+   */
+  quiet?: { fromHour: number; toHour: number; everyMs: number };
 }
 
 export interface JobDefinition {
@@ -22,12 +46,7 @@ export interface JobDefinition {
   name: string;
   /** The store or PostEx account the job covers, recorded in sync_runs. Defaults to `all`. */
   accountRef?: string;
-  schedule: {
-    /** Time from the end of one run to the start of the next. */
-    everyMs: number;
-    /** Run as soon as the scheduler starts instead of waiting one interval. Default true. */
-    runOnStart?: boolean;
-  };
+  schedule: JobSchedule;
   /** May return stats; they are merged over `ctx.stats`. */
   handler: (ctx: JobContext) => Promise<JobStats | void>;
 }
@@ -43,7 +62,31 @@ export interface RunResult {
   stats: JobStats;
   error?: string;
   durationMs: number;
+  /** What the run asked for through `ctx.runAgainIn`, if anything. */
+  nextRunInMs?: number;
 }
+
+const inQuietHours = (quiet: NonNullable<JobSchedule['quiet']>, now: Date): boolean => {
+  const hour = Number(formatKarachi(now).slice(11, 13));
+  return quiet.fromHour <= quiet.toHour ? hour >= quiet.fromHour && hour < quiet.toHour : hour >= quiet.fromHour || hour < quiet.toHour;
+};
+
+/**
+ * How long to wait before a job's next run: the run's own request or the schedule's interval,
+ * stretched to the quiet-hours interval overnight, then aligned to the clock if asked.
+ */
+export const nextDelayMs = (schedule: JobSchedule, now: Date, requestedMs?: number): number => {
+  let interval = requestedMs !== undefined && requestedMs > 0 ? requestedMs : schedule.everyMs;
+  if (schedule.quiet && inQuietHours(schedule.quiet, now)) interval = Math.max(interval, schedule.quiet.everyMs);
+  if (!schedule.alignToClock) return interval;
+  return interval - (now.getTime() % interval);
+};
+
+/**
+ * The overnight window note S4 recommends: full cadence 08:00–23:00 Karachi, hourly outside it.
+ * Nobody confirms orders or books parcels overnight, so nothing is lost by polling less.
+ */
+export const OVERNIGHT: NonNullable<JobSchedule['quiet']> = { fromHour: 23, toHour: 8, everyMs: 60 * 60 * 1000 };
 
 export class UnknownJobError extends Error {
   constructor(name: string, known: string[]) {
@@ -146,8 +189,8 @@ export class JobRunner {
     const timer = setTimeout(async () => {
       this.timers.delete(job.name);
       if (!this.started) return;
-      await this.runJobOnce(job.name);
-      if (this.started) this.schedule(job, job.schedule.everyMs);
+      const result = await this.runJobOnce(job.name);
+      if (this.started) this.schedule(job, nextDelayMs(job.schedule, new Date(), result.nextRunInMs));
     }, delayMs);
     this.timers.set(job.name, timer);
   }
@@ -202,8 +245,18 @@ export class JobRunner {
       const stats: JobStats = {};
       let status: RunStatus = 'succeeded';
       let error: string | undefined;
+      let nextRunInMs: number | undefined;
       try {
-        const returned = await job.handler({ sql: this.sql, logger: log, stats, signal: this.shutdown.signal, runId });
+        const returned = await job.handler({
+          sql: this.sql,
+          logger: log,
+          stats,
+          signal: this.shutdown.signal,
+          runId,
+          runAgainIn: (ms) => {
+            nextRunInMs = ms;
+          },
+        });
         if (returned) Object.assign(stats, returned);
       } catch (thrown) {
         status = 'failed';
@@ -216,7 +269,7 @@ export class JobRunner {
         set status = ${status}, finished_at = now(), stats = ${this.sql.json(stats)}, error = ${error ?? null}
         where id = ${runId}
       `;
-      const finished = result(status, { runId, stats, ...(error ? { error } : {}) });
+      const finished = result(status, { runId, stats, ...(error ? { error } : {}), ...(nextRunInMs !== undefined ? { nextRunInMs } : {}) });
       if (status === 'succeeded') log.info({ runId, stats, durationMs: finished.durationMs }, 'Job finished');
       return finished;
     } catch (failure) {

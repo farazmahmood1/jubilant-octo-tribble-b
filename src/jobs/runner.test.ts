@@ -12,7 +12,7 @@ import { type Sql, sslOptions } from '../db.js';
 import { migrate } from '../db/migrate.js';
 import type { Logger } from '../logger.js';
 import { type TestSchema, createTestDatabase, createTestSchema, skipWithoutDb } from '../test/db.js';
-import { type JobDefinition, JobRunner, UnknownJobError, exitCodeFor } from './runner.js';
+import { type JobDefinition, JobRunner, OVERNIGHT, UnknownJobError, exitCodeFor, nextDelayMs } from './runner.js';
 
 const silent = pino({ level: 'silent' }) as unknown as Logger;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -43,6 +43,45 @@ describe('exitCodeFor', () => {
   });
 });
 
+describe('nextDelayMs (risk R3: let Neon sleep between runs)', () => {
+  const MIN = 60_000;
+  /** A Karachi wall-clock time (UTC+5) as a Date. */
+  const pkt = (hhmmss: string) => new Date(`2026-09-20T${hhmmss}+05:00`);
+
+  it('waits the interval after the run when not aligned', () => {
+    assert.equal(nextDelayMs({ everyMs: 15 * MIN }, pkt('10:07:00')), 15 * MIN);
+  });
+
+  it('aligned, starts on the next multiple of the interval: :00, :15, :30, :45', () => {
+    assert.equal(nextDelayMs({ everyMs: 15 * MIN, alignToClock: true }, pkt('10:07:00')), 8 * MIN);
+    assert.equal(nextDelayMs({ everyMs: 15 * MIN, alignToClock: true }, pkt('10:14:59')), 1_000);
+    assert.equal(nextDelayMs({ everyMs: 15 * MIN, alignToClock: true }, pkt('10:15:00')), 15 * MIN, 'a run ending on the boundary waits a whole interval');
+    assert.equal(nextDelayMs({ everyMs: 60 * MIN, alignToClock: true }, pkt('10:20:00')), 40 * MIN);
+  });
+
+  it('a run may ask for a sooner run, which is aligned to its own interval', () => {
+    const schedule = { everyMs: 15 * MIN, alignToClock: true, quiet: OVERNIGHT };
+    assert.equal(nextDelayMs(schedule, pkt('10:07:00'), 5 * MIN), 3 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('10:07:00'), 0), 8 * MIN, 'zero or less is ignored');
+  });
+
+  it('stretches to hourly from 23:00 to 08:00 Karachi, across midnight, even when a run asks for sooner', () => {
+    const schedule = { everyMs: 15 * MIN, alignToClock: true, quiet: OVERNIGHT };
+    assert.equal(nextDelayMs(schedule, pkt('22:59:00')), 1 * MIN, 'still day: next quarter hour');
+    assert.equal(nextDelayMs(schedule, pkt('23:00:00')), 60 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('02:10:00'), 5 * MIN), 50 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('07:30:00')), 30 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('08:00:00')), 15 * MIN, 'day again');
+  });
+
+  it('a quiet window that does not wrap midnight', () => {
+    const schedule = { everyMs: 10 * MIN, quiet: { fromHour: 13, toHour: 15, everyMs: 30 * MIN } };
+    assert.equal(nextDelayMs(schedule, pkt('12:59:00')), 10 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('14:00:00')), 30 * MIN);
+    assert.equal(nextDelayMs(schedule, pkt('15:00:00')), 10 * MIN);
+  });
+});
+
 describe('JobRunner', { skip: skipWithoutDb }, () => {
   let schema: TestSchema;
 
@@ -59,6 +98,16 @@ describe('JobRunner', { skip: skipWithoutDb }, () => {
     schema.sql<{ id: string; status: string; stats: Record<string, unknown>; error: string | null; finished_at: Date | null }[]>`
       select id, status, stats, error, finished_at from sync_runs where job = ${name} order by id
     `;
+
+  it('reports what a run asked for through runAgainIn, and nothing when it asked for nothing', async () => {
+    const eager = unique('eager');
+    const plain = unique('plain');
+    const runner = new JobRunner(schema.sql, silent)
+      .register(job(eager, async ({ runAgainIn }) => runAgainIn(5 * 60_000)))
+      .register(job(plain, async () => {}));
+    assert.equal((await runner.runJobOnce(eager)).nextRunInMs, 5 * 60_000);
+    assert.equal((await runner.runJobOnce(plain)).nextRunInMs, undefined);
+  });
 
   it('records a successful run in exactly one sync_runs row, with its stats', async () => {
     const name = unique('ok');

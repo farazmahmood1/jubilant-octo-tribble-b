@@ -355,14 +355,14 @@ export const configuredStores = async (sql: Sql): Promise<StoreTarget[]> => {
 export const shopifyJobs: JobDefinition[] = [
   {
     name: CATALOGUE_JOB,
-    schedule: { everyMs: 60 * 60 * 1000 },
+    schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
     handler: async ({ sql, logger, signal }) => syncCatalogue({ sql, logger, signal, stores: await configuredStores(sql) }),
   },
   {
     name: ORDERS_JOB,
     // Webhooks are the fast path and shopify:catchup the 15-minute safety net, so the full cursor
     // walk only needs to run hourly.
-    schedule: { everyMs: 60 * 60 * 1000 },
+    schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
     handler: async ({ sql, logger, signal }) => syncOrders({ sql, logger, signal, stores: await configuredStores(sql) }),
   },
 ];

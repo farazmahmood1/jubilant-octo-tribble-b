@@ -59,7 +59,7 @@ src/
   jobs/                     job runner (lock, sync_runs, scheduler) and the job registry
   webhooks/                 Shopify webhook verification and processing
   gdpr/                     redaction for Shopify's GDPR webhooks
-  domain/                   pure business rules: shipment-to-order matching, order state
+  domain/                   business rules: shipment-to-order matching, order state, stock ledger
   db.ts                     Neon connection (TLS required except on localhost), health check
   db/                       migration runner, migrations/NNNN_name.sql, seed from config
   db/repos/                 typed upserts and reads: products, variants (+ costs), customers, orders
@@ -84,7 +84,7 @@ Two jobs fill the catalogue and the last 60 days of orders from both stores:
 
 ```bash
 npm run job -- shopify:catalogue   # every product and variant; hourly on the worker
-npm run job -- shopify:orders      # orders updated since the saved cursor; every 15 minutes
+npm run job -- shopify:orders      # orders updated since the saved cursor; hourly on the worker
 ```
 
 Each prints its stats as totals and per store (`nur.fetched`, `organics.inserted`, ...):
@@ -99,8 +99,8 @@ id only, never with customer data.
 
 ## PostEx sync
 
-`npm run job -- postex:sync` (every 5 minutes on the worker) does two things per account,
-read-only (PostEx has no write call anywhere in this code):
+`npm run job -- postex:sync` (every 15 minutes on the worker, see *Worker schedule*) does four
+things per account, read-only (PostEx has no write call anywhere in this code):
 
 1. **Find new parcels.** `get-all-order` from the account's cursor (minus 3 days) to today, in
    31-day chunks, at most every 15 minutes. The first run starts from 1 January 2026.
@@ -108,14 +108,46 @@ read-only (PostEx has no write call anywhere in this code):
    for delivery or attempted every 5 minutes; other open parcels every 15 minutes; open parcels
    booked over 30 days ago daily; delivered, returned or cancelled in the last 7 days daily (late
    fee corrections); older terminal parcels never.
+3. **Link parcels to orders** with the matcher: by order number (store prefixes from the
+   `matching` setting, e.g. `{"refPrefixes": {"nur": ["NBJ"]}}`), else by COD amount and city,
+   else by phone, within 3 days of booking and only on a single candidate. A fallback link opens
+   an info `match_suggested` item; a parcel with no link has an open `unmatched_shipment` item
+   with the reason, resolved when a later run finds the order. A manual link is never changed.
+4. **Move stock** for every parcel whose status or order link changed (see *Stock ledger*).
 
 History steps are inserted with the unique `(shipment, code, time)` key doing the dedupe, so a
 re-run adds no rows. A parcel's status, attempts and last failure reason are derived from all its
 stored steps, in event-time order. An unknown status code is reported once to the review queue.
 
+`npm run job -- postex:payouts` (daily) asks PostEx's payment status for delivered parcels not
+yet on a payout, oldest first, up to 600 per account per run. A settled parcel is recorded under
+its CPR in `cod_payouts`, with a `payout_lines` row worth its COD less the forward charge and
+tax; the payout's amount is the sum of its lines.
+
 To reconcile after a sync: `npm run postex:totals -- 2026-05-14 2026-09-19` and compare with
 877 delivered, 117 returned, PKR 209,009 forward and PKR 27,787 return charges (fees and their
 16% tax are shown apart).
+
+## Stock ledger
+
+Stock is a ledger (`stock_moves`), never a number: every move has a from and a to location
+(warehouse, partner, in transit, returning, customer, marketing, damaged, supplier, adjustment),
+and `stock_quants` is kept by a trigger on the ledger and can be recomputed with
+`rebuildQuants()`. A parcel's units follow its PostEx history: booked leaves the warehouse for in
+transit; delivered goes to customer (marketing for a PR order); return started or returned (0040,
+0006) goes to returning; cancelled by merchant (0002) goes back to the warehouse. 0006 moves
+nothing further: only a person checking the parcel in (`checkInReturn`, restocked or damaged)
+does, and `returnsAwaitingCheckIn()` lists the parcels PostEx has returned that nobody has
+checked in. Counts and corrections go through `recordAdjustment()`, against the adjustment
+location, and are audited. Order lines with no catalogue variant cannot move and are queued.
+
+## Worker schedule
+
+Neon suspends its compute when nothing queries it, so the jobs are timed to wake it as rarely as
+possible (risk R3, note S4): `postex:sync` and `shopify:catchup` run together on the quarter hour,
+the hourly jobs on the hour, and `postex:payouts` daily. Only while a parcel is out for delivery
+or has a failed attempt does `postex:sync` ask for 5 minutes. From 23:00 to 08:00 Karachi
+everything runs at most hourly.
 
 ## Shopify webhooks
 

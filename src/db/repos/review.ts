@@ -11,6 +11,7 @@ export interface ReviewItemInput {
   dedupeKey: string;
   storeId?: string | null;
   orderId?: string | null;
+  shipmentId?: string | null;
   severity?: 'info' | 'warning' | 'error';
   detail: Record<string, unknown>;
 }
@@ -29,8 +30,8 @@ export interface ReviewItemRow {
 /** Opens an item, or refreshes the detail of the one already open for the same problem. */
 export const openReviewItem = async (db: Db, input: ReviewItemInput): Promise<string> => {
   const [row] = await db<{ id: string }[]>`
-    insert into reconciliation_items (kind, dedupe_key, store_id, order_id, severity, detail)
-    values (${input.kind}, ${input.dedupeKey}, ${input.storeId ?? null}, ${input.orderId ?? null},
+    insert into reconciliation_items (kind, dedupe_key, store_id, order_id, shipment_id, severity, detail)
+    values (${input.kind}, ${input.dedupeKey}, ${input.storeId ?? null}, ${input.orderId ?? null}, ${input.shipmentId ?? null},
             ${input.severity ?? 'warning'}, ${db.json(input.detail as never)})
     on conflict (dedupe_key) where status = 'open' do update set detail = excluded.detail, severity = excluded.severity
     returning id
@@ -46,6 +47,17 @@ export const resolveReviewItem = async (db: Db, id: string, note: string, actorI
     set status = 'resolved', resolved_at = now(), resolved_by = ${actorId}, note = ${note}
     where id = ${id} and status = 'open'
   `;
+};
+
+/** Closes the open item for a problem, if there is one: the sync found the answer itself. */
+export const resolveOpenReviewItem = async (db: Db, dedupeKey: string, note: string): Promise<boolean> => {
+  const rows = await db`
+    update reconciliation_items
+    set status = 'resolved', resolved_at = now(), resolved_by = null, note = ${note}
+    where dedupe_key = ${dedupeKey} and status = 'open'
+    returning id
+  `;
+  return rows.length > 0;
 };
 
 export const listOpenReviewItems = async (db: Db, kind: string, storeId?: string): Promise<ReviewItemRow[]> => {

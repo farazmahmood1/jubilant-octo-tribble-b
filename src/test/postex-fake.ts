@@ -114,11 +114,19 @@ export interface FakePostex extends PostexSource {
   parcels: Array<Record<string, unknown>>;
   /** Every call, in order. A write would show up here; the tests assert none does. */
   calls: Array<{ method: string; args: unknown }>;
-  failOnce: (method: 'listOrders' | 'trackBulk', nth: number) => void;
+  failOnce: (method: 'listOrders' | 'trackBulk' | 'paymentStatus', nth: number) => void;
+  /** Delivered parcels PostEx has not paid out yet. Every other delivered parcel is settled. */
+  unsettled: Set<string>;
 }
 
+/** Monday of a parcel's delivery week: PostEx pays out in weekly batches in this fake. */
+const payoutWeek = (delivered: string): string => {
+  const day = new Date(`${delivered.slice(0, 10)}T00:00:00Z`);
+  return addDays(delivered.slice(0, 10), -((day.getUTCDay() + 6) % 7));
+};
+
 /**
- * Serves the two read calls the sync makes. The list call returns rows without history, as the
+ * Serves the read calls the PostEx jobs make. The list call returns rows without history, as the
  * cheaper endpoint may; track-bulk returns the full parcel with its history.
  */
 export const fakePostex = (parcels: Array<Record<string, unknown>>): FakePostex => {
@@ -128,6 +136,7 @@ export const fakePostex = (parcels: Array<Record<string, unknown>>): FakePostex 
     parcels,
     calls: [],
     failOnce: (method, nth) => void failures.set(method, nth),
+    unsettled: new Set(),
     listOrders: async ({ from, to }) => {
       fake.calls.push({ method: 'listOrders', args: { from, to } });
       fail('listOrders');
@@ -142,6 +151,20 @@ export const fakePostex = (parcels: Array<Record<string, unknown>>): FakePostex 
       fake.calls.push({ method: 'trackBulk', args: numbers.length });
       fail('trackBulk');
       return fake.parcels.filter((p) => numbers.includes(String(p['trackingNumber'])));
+    },
+    // A delivered parcel is paid out under its delivery week's CPR, a week after that Monday.
+    paymentStatus: async (trackingNumber) => {
+      fake.calls.push({ method: 'paymentStatus', args: trackingNumber });
+      fail('paymentStatus');
+      const parcel = fake.parcels.find((p) => p['trackingNumber'] === trackingNumber);
+      if (!parcel) throw new Error(`PostEx payment status: no parcel ${trackingNumber}`);
+      const delivered = parcel['orderDeliveryDate'];
+      if (typeof delivered !== 'string' || fake.unsettled.has(trackingNumber)) {
+        return { trackingNumber, orderRefNumber: parcel['orderRefNumber'], settle: false };
+      }
+      const week = payoutWeek(delivered);
+      const paid = `${addDays(week, 7)} 12:00:00`;
+      return { trackingNumber, orderRefNumber: parcel['orderRefNumber'], settle: true, settlementDate: paid, cpr1: `CPR-${week.replaceAll('-', '')}`, cpr1Date: paid };
     },
   };
   const fail = (method: string) => {
