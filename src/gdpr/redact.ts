@@ -7,9 +7,9 @@ import { normalizePk } from '../lib/phone.js';
  * GDPR redaction (Shopify's mandatory `customers/redact` and `shop/redact` webhooks).
  *
  * Personal data is scrubbed everywhere it is stored: the typed columns (name, phone, street
- * address, postcode, the parcel's phone) and the raw payloads kept for replay (`orders.raw`,
+ * address, postcode, the parcel's phone), the raw payloads kept for replay (`orders.raw`,
  * `shipments.raw`, `webhook_events.payload`), which hold the same data in Shopify's and PostEx's
- * own shapes. Rows are not deleted: orders, their money and their history stay, minus the person. City, province and country are kept; on their own they
+ * own shapes, and the notes agents typed on the Confirmation Desk. Rows are not deleted: orders, their money and their history stay, minus the person. City, province and country are kept; on their own they
  * identify nobody and the return-rate reports depend on them.
  *
  * Every redaction is one transaction and writes an `audit_log` row (CLAUDE.md rule 8).
@@ -82,6 +82,12 @@ const redact = async (sql: Sql, storeId: string, scope: Scope, action: string, d
       where customer_id = any(${customerIds}::bigint[])
     `;
     await maskRows(tx, 'orders', 'raw', orderIds);
+    // What agents typed at the Confirmation Desk can carry an address or a name.
+    await tx`
+      update confirmation_attempts set note = null, reason = null
+      where confirmation_id in (select id from confirmations where order_id = any(${orderIds}::bigint[]))
+        and (note is not null or reason is not null)
+    `;
 
     // Webhook payloads about these orders or this customer, in Shopify's REST shape.
     const shopifyCustomerIds = (

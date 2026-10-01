@@ -17,7 +17,7 @@ import {
 } from '../db/repos/shipments.js';
 import { recomputeOrderState } from '../db/repos/order-state.js';
 import { atomically } from '../db/repos/upsert.js';
-import { postShipmentAccounting } from '../domain/accounting.js';
+import { countPostings, postShipmentAccounting } from '../domain/accounting.js';
 import { reconcileShipmentStock } from '../domain/stock.js';
 import { postexClient } from '../integrations/postex/client.js';
 import { toCharges, toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
@@ -242,7 +242,7 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
     // After stock: COGS is the cost of the units the stock pass moved.
     for (const id of await accountingPending(deps.sql, account.id)) {
       const { actions } = await postShipmentAccounting(deps.sql, id);
-      counts.postings += Object.values(actions).filter((a) => a === 'posted' || a === 'reposted' || a === 'reversed').length;
+      counts.postings += countPostings(actions);
     }
     for (const [key, value] of Object.entries(counts)) {
       stats[key] = (Number(stats[key]) || 0) + value;

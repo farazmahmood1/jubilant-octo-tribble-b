@@ -5,7 +5,7 @@ import { costAt } from '../db/repos/variants.js';
 import { POSTEX_STATUS_CODES, type ShipmentEvent } from '../integrations/postex/mapper.js';
 import { type Paisa, ZERO, add, paisa, sub, sum } from '../lib/money.js';
 import { endOfKarachiDay, formatKarachi } from '../lib/time.js';
-import { canonicalOrder, explain } from './order-state.js';
+import { canonicalOrder, deliveryEpisodes, parcelTimeline } from './order-state.js';
 
 /**
  * Double-entry postings (BUILD-PLAN 1.5, Step 10). Every financial event becomes one journal
@@ -246,6 +246,8 @@ export interface PostInput {
    * use it; a person posting by hand does not, and gets the closed-period error.
    */
   rollForward?: boolean;
+  /** Which delivery of a parcel the entry belongs to (0011); 1 for everything else. */
+  occurrence?: number;
 }
 
 export interface Posted {
@@ -276,8 +278,8 @@ export const postEntry = async (db: Db, input: PostInput): Promise<Posted | null
     const date = input.rollForward ? await firstOpenDay(tx, input.date) : input.date;
     const memo = date === input.date ? input.memo : `${input.memo} (event dated ${input.date}, period closed)`;
     const [entry] = await tx<{ id: string }[]>`
-      insert into journal_entries (entry_date, memo, source_type, source_id, posted_by)
-      values (${date}, ${memo}, ${input.source.type}, ${input.source.id}, ${input.postedBy ?? null})
+      insert into journal_entries (entry_date, memo, source_type, source_id, posted_by, occurrence)
+      values (${date}, ${memo}, ${input.source.type}, ${input.source.id}, ${input.postedBy ?? null}, ${input.occurrence ?? 1})
       returning id
     `.catch(periodError);
     for (const line of lines) {
@@ -319,29 +321,30 @@ export const reverseEntry = async (
   });
 
 /** The live entry for a source, with its lines in the builder's shape, for comparison. */
-const liveEntry = async (db: Db, source: Source): Promise<{ id: string; lines: Line[] } | null> => {
-  const [entry] = await db<{ id: string }[]>`
-    select id from journal_entries where source_type = ${source.type} and source_id = ${source.id} and reversed_by is null
+const liveEntry = async (db: Db, source: Source): Promise<{ id: string; date: string; lines: Line[] } | null> => {
+  const [entry] = await db<{ id: string; entry_date: string }[]>`
+    select id, entry_date::text from journal_entries where source_type = ${source.type} and source_id = ${source.id} and reversed_by is null
   `;
-  if (!entry) return null;
+  return entry ? { id: entry.id, date: entry.entry_date, lines: await entryLines(db, entry.id) } : null;
+};
+
+/** An entry's lines in the builder's shape. */
+const entryLines = async (db: Db, entryId: string): Promise<Line[]> => {
   const rows = await db<{ code: string; debit: string; credit: string; partner_type: Partner['type'] | null; partner_id: string | null; store_id: string | null }[]>`
     select a.code, l.debit_paisa::text as debit, l.credit_paisa::text as credit, l.partner_type, l.partner_id, l.store_id
-    from journal_lines l join accounts a on a.id = l.account_id where l.entry_id = ${entry.id} order by l.id
+    from journal_lines l join accounts a on a.id = l.account_id where l.entry_id = ${entryId} order by l.id
   `;
   const byCode = new Map<string, AccountKey>(Object.entries(ACCOUNT_CODES).map(([k, code]) => [code, k as AccountKey]));
-  return {
-    id: entry.id,
-    lines: rows.map((r) => {
-      const debit = readPaisa(r.debit);
-      const credit = readPaisa(r.credit);
-      return {
-        account: byCode.get(r.code) ?? ('general' as AccountKey),
-        ...(debit > 0n ? { debit } : { credit }),
-        storeId: r.store_id,
-        partner: r.partner_type && r.partner_id ? { type: r.partner_type, id: r.partner_id } : null,
-      };
-    }),
-  };
+  return rows.map((r) => {
+    const debit = readPaisa(r.debit);
+    const credit = readPaisa(r.credit);
+    return {
+      account: byCode.get(r.code) ?? ('general' as AccountKey),
+      ...(debit > 0n ? { debit } : { credit }),
+      storeId: r.store_id,
+      partner: r.partner_type && r.partner_id ? { type: r.partner_type, id: r.partner_id } : null,
+    };
+  });
 };
 
 const sameLines = (a: readonly Line[], b: readonly Line[]): boolean => {
@@ -349,10 +352,25 @@ const sameLines = (a: readonly Line[], b: readonly Line[]): boolean => {
   return JSON.stringify(a.map(key).sort()) === JSON.stringify(b.map(key).sort());
 };
 
+const isClosedDay = async (db: Db, day: string): Promise<boolean> => {
+  const [year, month] = day.split('-').map(Number);
+  const [closed] = await db`select 1 from fiscal_periods where year = ${year!} and month = ${month!} and status = 'closed'`;
+  return closed !== undefined;
+};
+
 /**
- * Makes the live entry for a source equal `lines`: posts it if missing, leaves it if equal,
- * reverses and re-posts it if the amounts changed (a fee PostEx corrected), reverses it if it
- * should no longer exist. Returns what it did.
+ * Whether a live entry is dated where it should be. The day it should have is `day`, or the
+ * first open day after it when that month is closed (what posting it now would give). An entry
+ * in a month since closed stays where it is: closed months are final.
+ */
+const datedRight = async (db: Db, entryDate: string, day: string): Promise<boolean> =>
+  entryDate === (await firstOpenDay(db, day)) || (await isClosedDay(db, entryDate));
+
+/**
+ * Makes the live entry for a source equal `lines` on `date`: posts it if missing, leaves it if
+ * equal, reverses and re-posts it if the amounts changed (a fee PostEx corrected) or its day did
+ * (the step that dates it arrived after the amounts), reverses it if it should no longer exist.
+ * Which order the facts arrived in never shows in the result. Returns what it did.
  */
 export const settle = async (
   db: Db,
@@ -360,12 +378,14 @@ export const settle = async (
 ): Promise<'posted' | 'unchanged' | 'reposted' | 'reversed' | 'none'> => {
   const wanted = input.lines ? normalise(input.lines) : [];
   const live = await liveEntry(db, input.source);
-  if (live && wanted.length > 0 && sameLines(live.lines, wanted)) return 'unchanged';
+  const sameAmounts = live !== null && wanted.length > 0 && sameLines(live.lines, wanted);
+  if (live && sameAmounts && (await datedRight(db, live.date, input.date))) return 'unchanged';
   if (!live && wanted.length === 0) return 'none';
   if (live) {
     await reverseEntry(db, live.id, {
-      date: input.reverseDate ?? input.date,
-      memo: wanted.length > 0 ? 'Amounts changed' : 'No longer applies',
+      // A re-dated entry leaves its old day net zero.
+      date: sameAmounts ? live.date : (input.reverseDate ?? input.date),
+      memo: sameAmounts ? 'Date changed' : wanted.length > 0 ? 'Amounts changed' : 'No longer applies',
       rollForward: true,
     });
     if (wanted.length === 0) return 'reversed';
@@ -373,6 +393,74 @@ export const settle = async (
   await postEntry(db, { date: input.date, memo: input.memo, source: input.source, lines: wanted, rollForward: true });
   return live ? 'reposted' : 'posted';
 };
+
+/** A delivery of a parcel, as Karachi days: when it was delivered and, if it was, when that was undone. */
+export interface Episode {
+  from: string;
+  to: string | null;
+}
+
+/**
+ * Makes a parcel's sale (or COGS) entries equal its delivery episodes: for each delivery, an
+ * entry dated on the delivery day, reversed on the day the delivery was undone if it was. What
+ * the history says is all that matters, never when the sync saw it, so a parcel first seen
+ * already returned gets the same sale and reversal, on the same days, as one watched live; a
+ * replay and the live run write identical ledgers.
+ *
+ * Entries for a delivery the history no longer shows (PostEx corrected itself, the order link or
+ * the cost went away) are reversed on `staleDate`. An open delivery whose amounts changed is
+ * reversed and re-posted on its own day, as `settle` does. Returns what it did, joined by `+`.
+ */
+export const settleEpisodes = async (
+  db: Db,
+  input: { source: Source; lines: readonly Line[] | null; episodes: readonly Episode[]; memo: string; staleDate: string },
+): Promise<string> => {
+  const wanted = input.lines ? normalise(input.lines) : [];
+  const episodes = wanted.length > 0 ? input.episodes : [];
+  const chain = await db<{ id: string; occurrence: number; reversed_by: string | null; entry_date: string }[]>`
+    select id, occurrence, reversed_by, entry_date::text from journal_entries
+    where source_type = ${input.source.type} and source_id = ${input.source.id} order by id
+  `;
+  const done: string[] = [];
+  const post = (episode: Episode, occurrence: number) =>
+    postEntry(db, { date: episode.from, memo: input.memo, source: input.source, lines: wanted, rollForward: true, occurrence });
+
+  for (const entry of chain) {
+    if (entry.occurrence <= episodes.length || entry.reversed_by) continue;
+    await reverseEntry(db, entry.id, { date: input.staleDate, memo: 'No longer applies', rollForward: true });
+    done.push('reversed');
+  }
+  for (const [i, episode] of episodes.entries()) {
+    const occurrence = i + 1;
+    const own = chain.filter((e) => e.occurrence === occurrence);
+    const live = own.find((e) => !e.reversed_by);
+    if (episode.to !== null) {
+      // A delivery that was undone: its sale exists and is reversed on the day it was undone.
+      if (own.length === 0) {
+        const posted = await post(episode, occurrence);
+        await reverseEntry(db, posted!.id, { date: episode.to, memo: 'Returned after delivery', rollForward: true });
+        done.push('posted', 'reversed');
+      } else if (live) {
+        await reverseEntry(db, live.id, { date: episode.to, memo: 'Returned after delivery', rollForward: true });
+        done.push('reversed');
+      }
+      continue;
+    }
+    const sameAmounts = live !== undefined && sameLines(await entryLines(db, live.id), wanted);
+    if (live && sameAmounts && (await datedRight(db, live.entry_date, episode.from))) continue;
+    if (live) await reverseEntry(db, live.id, { date: sameAmounts ? live.entry_date : episode.from, memo: sameAmounts ? 'Date changed' : 'Amounts changed', rollForward: true });
+    await post(episode, occurrence);
+    done.push(live ? 'reposted' : 'posted');
+  }
+  if (done.length > 0) return done.join('+');
+  return chain.length > 0 ? 'unchanged' : 'none';
+};
+
+/** How many entries a set of posting actions wrote (posted, re-posted or reversed). */
+export const countPostings = (actions: Record<string, string>): number =>
+  Object.values(actions)
+    .flatMap((a) => a.split('+'))
+    .filter((a) => a === 'posted' || a === 'reposted' || a === 'reversed').length;
 
 // ---- Shipment events ----
 
@@ -415,18 +503,6 @@ const parcelCost = async (
   return missing ? null : total;
 };
 
-/**
- * When a delivered parcel stopped being delivered: the first step after its last delivery. Read
- * from the whole history rather than from whatever step is newest when the pass runs, so a
- * replay dates the reversal the same way as the live run did.
- */
-export const leftDeliveredAt = (events: readonly ShipmentEvent[]): Date | null => {
-  const ordered = canonicalOrder(events);
-  const lastDelivery = ordered.map((e) => e.code).lastIndexOf('0005');
-  if (lastDelivery < 0) return null;
-  return ordered.slice(lastDelivery + 1).find((e) => e.occurredAt)?.occurredAt ?? null;
-};
-
 export interface ShipmentPostingResult {
   shipmentId: string;
   actions: Record<string, string>;
@@ -436,8 +512,9 @@ export interface ShipmentPostingResult {
  * The shipment-delivered handler, and the only place revenue is recognised (1.6). Brings the
  * journal in line with a parcel's facts; safe to run any number of times.
  *
- * - Delivered (by the replayed history): sale and COGS are live. Not delivered: they are not;
- *   a parcel delivered and then returned gets both reversed, dated by the return event.
+ * - Sale and COGS follow the parcel's delivery episodes (`settleEpisodes`): posted on the
+ *   delivery day, and reversed on the day a customer return undid the delivery. The ledger is
+ *   the same whether the sync saw the parcel delivered first or only after its return.
  * - Forward and return charges are live at PostEx's current amounts, whatever happened to the
  *   parcel: a returned parcel keeps both.
  * - A damaged check-in writes off the cost of the units that came back.
@@ -471,16 +548,20 @@ export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Prom
       select code, message, occurred_at from shipment_events where shipment_id = ${shipmentId}
     `;
     const events: ShipmentEvent[] = stored.map((e) => ({ code: e.code, message: e.message, occurredAt: e.occurred_at, known: Object.hasOwn(POSTEX_STATUS_CODES, e.code) }));
-    const state = explain({ order: { channel: 'online', cancelledAt: null }, shipment: { trackingNumber: p.tracking_number }, events, confirmation: null });
-    const decidedAt = state.decidedBy.kind === 'event' ? state.decidedBy.occurredAt : null;
-    const eventDay = karachiDay(decidedAt ?? p.booked_at ?? p.created_at);
     const pr = p.channel === 'pr';
     const ref = (type: string): Source => ({ type, id: shipmentId });
 
-    // Sale and COGS.
-    const delivered = state.state === 'delivered' && p.order_id !== null && p.total !== null && p.placed_at !== null;
+    // Sale and COGS, one per delivery the history shows.
+    const dayOf = (event: ShipmentEvent | null, fallback: string) => (event?.occurredAt ? karachiDay(event.occurredAt) : fallback);
+    const bookedDay = karachiDay(p.booked_at ?? p.created_at);
+    const episodes: Episode[] = deliveryEpisodes(events).map((e) => {
+      const from = dayOf(e.deliveredBy, bookedDay);
+      return { from, to: e.endedBy ? dayOf(e.endedBy, from) : null };
+    });
+    const staleDate = dayOf(parcelTimeline(events).at(-1)?.event ?? null, bookedDay);
+    const linked = p.order_id !== null && p.total !== null && p.placed_at !== null;
     const saleWanted =
-      delivered && !pr
+      linked && !pr
         ? saleLines({
             storeId,
             postexAccountId: p.postex_account_id,
@@ -489,28 +570,27 @@ export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Prom
             orderTax: readPaisa(p.tax ?? '0'),
           })
         : null;
-    const reverseDay = karachiDay(leftDeliveredAt(events) ?? decidedAt ?? p.booked_at ?? p.created_at);
-    actions['sale'] = await settle(tx, { source: ref('shipment_sale'), lines: saleWanted, date: eventDay, reverseDate: reverseDay, memo: `Delivered: ${p.tracking_number}` });
-    const cost = delivered ? await parcelCost(tx, shipmentId, p.placed_at!, storeId, 'in_transit') : null;
-    actions['cogs'] = await settle(tx, {
+    actions['sale'] = await settleEpisodes(tx, { source: ref('shipment_sale'), lines: saleWanted, episodes, staleDate, memo: `Delivered: ${p.tracking_number}` });
+    const everDelivered = linked && episodes.length > 0;
+    const cost = everDelivered ? await parcelCost(tx, shipmentId, p.placed_at!, storeId, 'in_transit') : null;
+    actions['cogs'] = await settleEpisodes(tx, {
       source: ref('shipment_cogs'),
       lines: cost === null ? null : cogsLines({ storeId, cost, pr }),
-      date: eventDay,
-      reverseDate: reverseDay,
+      episodes,
+      staleDate,
       memo: `${pr ? 'PR goods' : 'Cost of goods'} delivered: ${p.tracking_number}`,
     });
-    if (delivered && cost === null) actions['cogs'] = 'cost_missing';
+    if (everDelivered && cost === null) actions['cogs'] = 'cost_missing';
 
     // Charges, as PostEx currently reports them.
     const charges = await tx<{ kind: string; amount: string }[]>`select kind, amount_paisa::text as amount from shipment_charges where shipment_id = ${shipmentId}`;
     const charge = (kind: string) => readPaisa(charges.find((c) => c.kind === kind)?.amount ?? '0');
     const claimTax = await claimTaxSetting(tx);
     const base = { storeId, postexAccountId: p.postex_account_id, pr, claimTax };
-    const chargeDay = karachiDay(p.booked_at ?? p.created_at);
     actions['forwardCharge'] = await settle(tx, {
       source: ref('shipment_forward_charge'),
       lines: forwardChargeLines({ ...base, fee: charge('forward'), tax: charge('forward_tax') }),
-      date: chargeDay,
+      date: bookedDay,
       memo: `PostEx forward charge: ${p.tracking_number}`,
     });
     // Dated by the return's first step, for the same reason as the reversal above.
@@ -518,7 +598,8 @@ export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Prom
     actions['returnCharge'] = await settle(tx, {
       source: ref('shipment_return_charge'),
       lines: returnChargeLines({ ...base, fee: charge('reversal'), tax: charge('reversal_tax') }),
-      date: returnStarted ? karachiDay(returnStarted) : eventDay,
+      // No return step yet: the booking day, which every later sync agrees on.
+      date: returnStarted ? karachiDay(returnStarted) : bookedDay,
       memo: `PostEx return charge: ${p.tracking_number}`,
     });
 
@@ -655,7 +736,7 @@ export const replayAccounting = async (sql: Sql): Promise<{ shipments: number; p
   let postings = 0;
   for (const { id } of shipments) {
     const { actions } = await postShipmentAccounting(sql, id);
-    postings += Object.values(actions).filter((a) => a === 'posted' || a === 'reposted' || a === 'reversed').length;
+    postings += countPostings(actions);
   }
   const lines = await sql<{ id: string }[]>`select id from payout_lines order by id`;
   let payoutLinesPosted = 0;

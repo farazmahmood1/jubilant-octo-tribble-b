@@ -1,12 +1,24 @@
 import type { Sql } from '../db.js';
 import { openReviewItem, resolveOpenReviewItem } from '../db/repos/review.js';
 import { readPaisa } from '../db/repos/upsert.js';
-import { type Finding, type OrderFacts, type ParcelFacts, RULE_KINDS, type SiblingFacts, evaluate } from '../domain/reconciliation.js';
+import type { ConfirmationState } from '../domain/order-state.js';
+import {
+  type Finding,
+  ORDER_RULE_KINDS,
+  type OrderFacts,
+  type ParcelFacts,
+  RULE_KINDS,
+  type SiblingFacts,
+  evaluate,
+  evaluateOrder,
+} from '../domain/reconciliation.js';
 import type { Logger } from '../logger.js';
 import type { JobDefinition, JobStats } from './runner.js';
 
 export const RECONCILIATION_JOB = 'reconciliation:scan';
 export const DEFAULT_STUCK_DAYS = 7;
+export const DEFAULT_CONFIRMED_NOT_BOOKED_HOURS = 24;
+export const DEFAULT_CONFIRMED_LOOKBACK_DAYS = 30;
 
 export interface ScanDeps {
   sql: Sql;
@@ -35,8 +47,9 @@ interface Row {
 const refKey = (account: string, ref: string | null): string | null => (ref?.trim() ? `${account}:${ref.trim().toUpperCase()}` : null);
 
 /**
- * `reconciliation:scan`: evaluates the five rules over every parcel and keeps the queue equal to
- * what they find.
+ * `reconciliation:scan`: evaluates the five parcel rules over every parcel and the desk's two
+ * order rules over every confirmed-but-unbooked or cancelled-but-booked order, and keeps the
+ * queue equal to what they find.
  * - A finding with no open item opens one, unless a person already resolved or ignored that
  *   problem (it stays decided).
  * - A finding with an open item refreshes its detail; except an unmatched parcel's, whose detail
@@ -46,7 +59,9 @@ const refKey = (account: string, ref: string | null): string | null => (ref?.tri
  */
 export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
   const now = (deps.now ?? (() => new Date()))();
-  const [alerts] = await deps.sql<{ value: { stuckDays?: number } }[]>`select value from app_settings where key = 'alerts'`;
+  const [alerts] = await deps.sql<{ value: { stuckDays?: number; confirmedNotBookedHours?: number; confirmedLookbackDays?: number } }[]>`
+    select value from app_settings where key = 'alerts'
+  `;
   const stuckDays = alerts?.value.stuckDays ?? DEFAULT_STUCK_DAYS;
 
   const rows = await deps.sql<Row[]>`
@@ -97,12 +112,51 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
     }
   }
 
+  // The desk's alerts: only orders that could raise one are read.
+  const orders = await deps.sql<
+    {
+      id: string; store_id: string; order_number: string; placed_at: Date; cancelled_at: Date | null; fulfillment_status: string | null;
+      state: ConfirmationState | null; confirmed_at: Date | null; parcels: Array<{ id: string; trackingNumber: string; statusCode: string | null }>;
+    }[]
+  >`
+    select o.id, o.store_id, o.order_number, o.placed_at, o.cancelled_at, o.fulfillment_status, c.state,
+           coalesce(c.confirmed_at, (select min(l.at) from order_state_log l where l.order_id = o.id and l.to_state in ('confirmed', 'ready_to_book'))) as confirmed_at,
+           coalesce((select json_agg(json_build_object('id', s.id::text, 'trackingNumber', s.tracking_number, 'statusCode', s.status_code) order by s.id)
+                     from shipments s where s.order_id = o.id), '[]') as parcels
+    from orders o left join confirmations c on c.order_id = o.id
+    where o.channel = 'online'
+      and ((c.state in ('confirmed', 'changed') and o.cancelled_at is null and not exists (select 1 from shipments s where s.order_id = o.id))
+           or ((o.cancelled_at is not null or c.state = 'cancelled') and exists (select 1 from shipments s where s.order_id = o.id)))
+    order by o.id
+  `;
+  const orderRules = {
+    now,
+    confirmedNotBookedHours: alerts?.value.confirmedNotBookedHours ?? DEFAULT_CONFIRMED_NOT_BOOKED_HOURS,
+    lookbackDays: alerts?.value.confirmedLookbackDays ?? DEFAULT_CONFIRMED_LOOKBACK_DAYS,
+  };
+  for (const o of orders) {
+    const order = {
+      id: o.id,
+      orderNumber: o.order_number,
+      placedAt: o.placed_at,
+      confirmation: o.state,
+      confirmedAt: o.confirmed_at,
+      cancelledInShopify: o.cancelled_at !== null,
+      onHold: o.fulfillment_status === 'on_hold',
+      parcels: o.parcels,
+    };
+    for (const finding of evaluateOrder({ order, ...orderRules })) {
+      const shipmentId = finding.kind === 'cancelled_but_booked' ? (o.parcels.find((p) => p.statusCode !== '0002')?.id ?? null) : null;
+      findings.set(finding.dedupeKey, { finding, storeId: o.store_id, shipmentId, orderId: o.id });
+    }
+  }
+
   const open = await deps.sql<{ dedupe_key: string; kind: string }[]>`
-    select dedupe_key, kind from reconciliation_items where status = 'open' and kind = any(${[...RULE_KINDS]}::text[])
+    select dedupe_key, kind from reconciliation_items where status = 'open' and kind = any(${[...RULE_KINDS, ...ORDER_RULE_KINDS]}::text[])
   `;
   const openKeys = new Set(open.map((o) => o.dedupe_key));
 
-  const stats: JobStats = { parcels: rows.length, opened: 0, refreshed: 0, suppressed: 0, closed: 0 };
+  const stats: JobStats = { parcels: rows.length, orders: orders.length, opened: 0, refreshed: 0, suppressed: 0, closed: 0 };
   const bump = (key: string) => void (stats[key] = (Number(stats[key]) || 0) + 1);
   for (const [key, { finding, storeId, shipmentId, orderId }] of findings) {
     bump(`found.${finding.kind}`);

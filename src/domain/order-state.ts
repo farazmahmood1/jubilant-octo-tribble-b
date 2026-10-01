@@ -127,21 +127,63 @@ const describeEvent = (event: ShipmentEvent): string => {
   return `PostEx ${event.code} "${event.message}"${when}`;
 };
 
-const parcelExplanation = (trackingNumber: string, events: readonly ShipmentEvent[]): StateExplanation => {
-  const anomalies = new Set<Anomaly>();
-  let state: OrderState = 'booked';
-  let decider: ShipmentEvent | null = null;
+/** One step of a parcel's replayed history that moved its state. */
+export interface ParcelStep {
+  from: OrderState;
+  to: OrderState;
+  event: ShipmentEvent;
+}
 
+/**
+ * Every state change a parcel's history makes, in canonical order, starting from `booked`. The
+ * state rules and the posting rules both read this, so they cannot disagree about what happened
+ * or when.
+ */
+export const parcelTimeline = (events: readonly ShipmentEvent[]): ParcelStep[] => {
+  const steps: ParcelStep[] = [];
+  let state: OrderState = 'booked';
   for (const event of canonicalOrder(events)) {
-    if (timeOf(event) === null) anomalies.add('undated_event');
     const known = Object.hasOwn(POSTEX_STATUS_CODES, event.code);
-    if (!known) anomalies.add('unknown_status');
     const step = (known ? STEP[event.code] : undefined) ?? UNKNOWN_STEP;
     if (step.always || state === 'booked') {
+      steps.push({ from: state, to: step.to, event });
       state = step.to;
-      decider = event;
     }
   }
+  return steps;
+};
+
+/** A stretch of a parcel's history during which it stood delivered. */
+export interface DeliveryEpisode {
+  deliveredBy: ShipmentEvent;
+  /** The step that took it out of delivered (a customer return); null while it still stands. */
+  endedBy: ShipmentEvent | null;
+}
+
+/**
+ * Each time the history delivered the parcel and, if it did, what undid it. Almost every parcel
+ * has none or one; a parcel returned and delivered again has two. A repeated `0005` while
+ * already delivered continues the same episode.
+ */
+export const deliveryEpisodes = (events: readonly ShipmentEvent[]): DeliveryEpisode[] => {
+  const episodes: DeliveryEpisode[] = [];
+  for (const step of parcelTimeline(events)) {
+    const open = episodes.at(-1);
+    if (step.to === 'delivered' && step.from !== 'delivered') episodes.push({ deliveredBy: step.event, endedBy: null });
+    else if (step.from === 'delivered' && step.to !== 'delivered' && open && !open.endedBy) open.endedBy = step.event;
+  }
+  return episodes;
+};
+
+const parcelExplanation = (trackingNumber: string, events: readonly ShipmentEvent[]): StateExplanation => {
+  const anomalies = new Set<Anomaly>();
+  for (const event of events) {
+    if (timeOf(event) === null) anomalies.add('undated_event');
+    if (!Object.hasOwn(POSTEX_STATUS_CODES, event.code)) anomalies.add('unknown_status');
+  }
+  const last = parcelTimeline(events).at(-1);
+  const state: OrderState = last?.to ?? 'booked';
+  const decider: ShipmentEvent | null = last?.event ?? null;
 
   if (!decider) {
     return {

@@ -279,6 +279,105 @@ describe('the journal in the database', { skip: skipWithoutDb }, () => {
     assert.equal(tb.debit, tb.credit);
   });
 
+  /** Every entry of a parcel and its reversals, as `type|occurrence|date|pairs`: what a ledger says about it. */
+  const ledgerOf = async (shipmentId: string): Promise<string[]> => {
+    const rows = await s.schema.sql<{ kind: string; occurrence: number; d: string; pairs: string }[]>`
+      select coalesce('reversal of ' || o.source_type, e.source_type) as kind, coalesce(o.occurrence, e.occurrence) as occurrence,
+             e.entry_date::text as d,
+             (select string_agg(case when l.debit_paisa > 0 then 'Dr ' || a.code || ' ' || l.debit_paisa else 'Cr ' || a.code || ' ' || l.credit_paisa end, ', '
+                                order by a.code, l.debit_paisa, l.credit_paisa)
+              from journal_lines l join accounts a on a.id = l.account_id where l.entry_id = e.id) as pairs
+      from journal_entries e left join journal_entries o on o.id = e.reverses_id
+      where coalesce(o.source_type, e.source_type) like 'shipment\\_%' and coalesce(o.source_id, e.source_id) = ${shipmentId}
+    `;
+    return rows.map((r) => `${r.kind}|${r.occurrence}|${r.d}|${r.pairs}`).sort();
+  };
+  /** The parcel's sale and COGS entries exactly, and every account's net movement per day. */
+  const comparable = async (shipmentId: string) => {
+    const days = await s.schema.sql<{ k: string }[]>`
+      select a.code || '|' || l.entry_date || '|' || sum(l.debit_paisa - l.credit_paisa) as k
+      from ledger_lines l join accounts a on a.code = l.account_code where l.shipment_id = ${shipmentId}
+      group by a.code, l.entry_date having sum(l.debit_paisa - l.credit_paisa) <> 0 order by 1
+    `;
+    return { saleAndCogs: (await ledgerOf(shipmentId)).filter((l) => /shipment_(sale|cogs)\|/.test(l)), netByDay: days.map((d) => d.k) };
+  };
+
+  /**
+   * Two identical parcels: one settled after every step, as the live sync sees it; one settled
+   * once, after all of them. A charge is `[kind, rupees, step]`: reported with that step (index),
+   * or from booking when the step is left out.
+   */
+  const liveAndLate = async (steps: Array<[string, string]>, charges: Array<[string, number, number?]> = []) => {
+    const lines = [{ variantId: variants[0]!, qty: 1 }];
+    const live = await newParcel(await order({ total: 2400, tax: 100, lines }), []);
+    const late = await newParcel(await order({ total: 2400, tax: 100, lines }), []);
+    const chargesWith = async (step: number | undefined) => {
+      for (const [kind, rupees, at] of charges) if (at === step) for (const id of [live, late]) await charge(id, kind, rupees);
+    };
+    await chargesWith(undefined);
+    await settleParcel(live);
+    for (const [i, [code, at]] of steps.entries()) {
+      await addEvent(s.schema.sql, live, code, at);
+      await addEvent(s.schema.sql, late, code, at);
+      await chargesWith(i);
+      await settleParcel(live);
+    }
+    await settleParcel(late);
+    return { live, late };
+  };
+
+  it('REPLAY = LIVE: a parcel first seen already returned gets the same sale, reversal and dates as one watched live', async () => {
+    const { live, late } = await liveAndLate(
+      [['0005', '2026-09-03T10:00:00Z'], ['0040', '2026-09-06T09:00:00Z'], ['0006', '2026-09-09T09:00:00Z']],
+      [['forward', 200], ['forward_tax', 32], ['reversal', 150, 1], ['reversal_tax', 24, 1]],
+    );
+    const ledger = await ledgerOf(late);
+    assert.deepEqual(ledger, await ledgerOf(live));
+    assert.deepEqual(await comparable(late), await comparable(live));
+    // Gross, not netted away: the delivery month shows the sale and the return month its reversal.
+    assert.ok(ledger.includes('shipment_sale|1|2026-09-03|Dr 1100 240000, Cr 2100 10000, Cr 4000 230000'), ledger.join('\n'));
+    assert.ok(ledger.includes('reversal of shipment_sale|1|2026-09-06|Cr 1100 240000, Dr 2100 10000, Dr 4000 230000'), ledger.join('\n'));
+    assert.ok(ledger.some((l) => l.startsWith('reversal of shipment_cogs|1|2026-09-06|')));
+    // Running it again changes nothing on either path.
+    const before = await entries();
+    for (const id of [live, late]) {
+      const again = await postShipmentAccounting(s.schema.sql, id);
+      assert.deepEqual([again.actions['sale'], again.actions['cogs']], ['unchanged', 'unchanged']);
+    }
+    assert.equal(await entries(), before);
+  });
+
+  it('returned and then delivered again: two sales, the first reversed, identical on both paths', async () => {
+    const { live, late } = await liveAndLate([['0005', '2026-09-03T10:00:00Z'], ['0040', '2026-09-06T09:00:00Z'], ['0005', '2026-09-10T11:00:00Z']]);
+    const ledger = await ledgerOf(late);
+    assert.deepEqual(ledger, await ledgerOf(live));
+    assert.deepEqual(
+      ledger.filter((l) => l.includes('shipment_sale')).map((l) => l.split('|').slice(0, 3).join('|')),
+      ['reversal of shipment_sale|1|2026-09-06', 'shipment_sale|1|2026-09-03', 'shipment_sale|2|2026-09-10'],
+    );
+    assert.deepEqual(await entryPairs('shipment_sale', late), ['Cr 2100 10000', 'Cr 4000 230000', 'Dr 1100 240000'], 'the second delivery is live');
+  });
+
+  it('REPLAY = LIVE over 40 random histories: identical sale and COGS entries, and identical balances day by day', async () => {
+    let seed = 20_261_001;
+    const random = () => ((seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648);
+    const codes = ['0008', '0013', '0005', '0040', '0006', '0005', '0013'];
+    for (let i = 0; i < 40; i++) {
+      const steps: Array<[string, string]> = [];
+      let at = Date.parse('2026-09-02T08:00:00Z');
+      for (let k = 0; k < 1 + Math.floor(random() * 5); k++) {
+        at += Math.floor(1 + random() * 3) * 86_400_000 + Math.floor(random() * 50_000_000);
+        steps.push([codes[Math.floor(random() * codes.length)]!, new Date(at).toISOString()]);
+      }
+      const { live, late } = await liveAndLate(steps, random() < 0.5 ? [['forward', 200], ['reversal', 150]] : []);
+      // A fee PostEx reports before the step that dates it leaves a same-day post and reversal on the
+      // live path only; it nets to zero on its day, so the per-day balances still agree.
+      assert.deepEqual(await comparable(late), await comparable(live), `history ${steps.map((st) => st.join('@')).join(', ')}`);
+    }
+    const tb = await trialBalance(s.schema.sql, { storeId: s.nur });
+    assert.equal(tb.debit, tb.credit);
+  });
+
   it('refused and never delivered (S11): no revenue or COGS is ever posted, only the charges', async () => {
     const orderId = await order();
     const id = await newParcel(orderId, [['0013', '2026-09-02T09:00:00Z'], ['0040', '2026-09-03T09:00:00Z'], ['0006', '2026-09-07T09:00:00Z']]);

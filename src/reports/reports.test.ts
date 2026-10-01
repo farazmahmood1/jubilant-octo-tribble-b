@@ -91,7 +91,19 @@ describe('reports over one mixed dataset', { skip: skipWithoutDb }, () => {
     await parcelFor('PR_DELIVERED', { total: 0, channel: 'pr', events: delivered('2026-09-04'), charges: [['forward', 200]] });
     await parcelFor('PR_RETURNED', { total: 0, channel: 'pr', events: [['0040', '2026-09-03T09:00:00Z'], ['0006', '2026-09-06T09:00:00Z']] });
     await parcelFor('CUSTOMER_RETURN', { total: 1800, events: delivered('2026-09-03'), later: [['0040', '2026-09-08T09:00:00Z'], ['0006', '2026-09-10T09:00:00Z']] });
-    await parcelFor('ORGANICS', { store: 'organics', total: 1500, events: delivered('2026-09-12'), city: 'Karachi', code: 'INF10' });
+    await parcelFor('ORGANICS', { store: 'organics', total: 1500, events: delivered('2026-09-12'), city: 'Karachi', code: 'inf10' });
+    // INF10 is an influencer's code on Organics (typed lower-case at checkout); B used a code nobody owns.
+    const [influencer] = await s.schema.sql<{ id: string }[]>`insert into influencers (handle, name) values ('test.creator', 'Test Creator') returning id`;
+    id['influencer'] = influencer!.id;
+    await s.schema.sql`insert into influencer_codes (influencer_id, store_id, discount_code) values (${influencer!.id}, ${s.organics}, 'INF10')`;
+    await s.schema.sql`update orders set discount_codes = '{WELCOME5}' where id = ${id['B.order']!}`;
+    // Agent Test confirmed A at the desk.
+    const [agent] = await s.schema.sql<{ id: string }[]>`insert into users (email, name, role) values ('agent@example.com', 'Agent Test', 'agent') returning id`;
+    id['agent'] = agent!.id;
+    const [cf] = await s.schema.sql<{ id: string }[]>`
+      insert into confirmations (order_id, state, source, agent_id, attempts, confirmed_at) values (${id['A.order']!}, 'confirmed', 'desk', ${agent!.id}, 1, '2026-09-01T06:00:00Z') returning id
+    `;
+    await s.schema.sql`insert into confirmation_attempts (confirmation_id, agent_id, channel, at, outcome) values (${cf!.id}, ${agent!.id}, 'call', '2026-09-01T06:00:00Z', 'confirmed')`;
     // Placed and confirmed, never booked: no parcel at all.
     id['PLACED.order'] = await orderWithLines(s.schema.sql, { storeId: s.nur, number: '#PLACED', placedAt: new Date('2026-09-02T05:00:00Z'), totalPaisa: 990_000n, lines: [] });
 
@@ -173,13 +185,30 @@ describe('reports over one mixed dataset', { skip: skipWithoutDb }, () => {
     const partners = await breakdown(s.schema.sql, 'partner');
     assert.deepEqual(partners.map((r) => [r.key, r.label, r.revenue, r.goods]), [[id['partner'], 'Test Grocer', rs(5000), rs(2000)]]);
     const influencers = await breakdown(s.schema.sql, 'influencer');
-    assert.equal(influencers.find((r) => r.key === 'inf10')?.revenue, rs(1500));
-    assert.deepEqual((await drillBreakdown(s.schema.sql, 'influencer', 'inf10')).shipmentIds, [id['ORGANICS']!]);
-    assert.deepEqual((await breakdown(s.schema.sql, 'agent')).map((r) => r.label), ['(not recorded)']);
+    const creator = influencers.find((r) => r.key === `influencer:${id['influencer']}`);
+    assert.deepEqual([creator?.label, creator?.revenue], ['Test Creator (@test.creator)', rs(1500)], 'the code resolves to its influencer, whatever its case');
+    assert.deepEqual(
+      [influencers.find((r) => r.key === 'code:welcome5')?.label, influencers.find((r) => r.key === 'code:welcome5')?.revenue],
+      ['WELCOME5 (unassigned code)', rs(3200)],
+    );
+    assert.deepEqual((await drillBreakdown(s.schema.sql, 'influencer', `influencer:${id['influencer']}`)).shipmentIds, [id['ORGANICS']!]);
+
+    const agents = await breakdown(s.schema.sql, 'agent');
+    assert.deepEqual(agents.find((r) => r.key === id['agent'])?.label, 'Agent Test');
+    assert.deepEqual([agents.find((r) => r.key === id['agent'])?.revenue, agents.find((r) => r.key === id['agent'])?.parcels], [rs(2750), 1]);
+    assert.equal(agents.find((r) => r.key === '-')?.label, '(not confirmed at the desk)');
+    assert.deepEqual((await drillBreakdown(s.schema.sql, 'agent', id['agent']!)).shipmentIds, [id['A']!]);
 
     const products = await productBreakdown(s.schema.sql, { store: 'nur' });
-    assert.deepEqual(products.map((p) => [p.units, p.goodsCost]), [[4, rs(1800)]], 'A and B, two units each at Rs 450');
-    assert.deepEqual((await drillProductBreakdown(s.schema.sql, id['nurVariant']!)).orderIds.sort(), [id['A.order']!, id['B.order']!].sort());
+    // A and B delivered, two units each; the customer return delivered two and took them back.
+    assert.deepEqual(products.rows.map((p) => [p.key, p.units, p.revenue, p.goods]), [[id['nurVariant'], 4, rs(5950), rs(1800)]]);
+    assert.equal(products.revenue, (await deliveredRevenue(s.schema.sql, { store: 'nur' })).parcels, 'the rows add up to the ledger');
+    const early = await productBreakdown(s.schema.sql, { store: 'nur', to: '2026-09-04' });
+    assert.deepEqual(early.rows.map((p) => [p.units, p.revenue]), [[4, rs(4550)]], 'before the return: A and the customer return');
+    assert.deepEqual(
+      (await drillProductBreakdown(s.schema.sql, id['nurVariant']!, { store: 'nur' })).orderIds.sort(),
+      [id['A.order']!, id['B.order']!, id['CUSTOMER_RETURN.order']!].sort(),
+    );
   });
 
   it('cash awaiting payout, aged by days since delivery, with charges on parcels with no sale kept apart', async () => {
@@ -247,5 +276,63 @@ describe('reports over one mixed dataset', { skip: skipWithoutDb }, () => {
       assert.ok(used.size > 0, `${name} uses an index`);
       for (const index of needs) assert.ok(used.has(index), `${name} needs ${index}; its plan used ${[...used].sort().join(', ')}`);
     }
+  });
+});
+
+describe('product breakdown: each parcel\'s ledger lines split across its items, exactly', { skip: skipWithoutDb }, () => {
+  it('rows add up to the parcels\' revenue and COGS in the ledger for any filter, shipping and discounts included', async (t) => {
+    const s = await migratedWithStores();
+    t.after(() => s.schema.drop());
+    const [account] = await s.schema.sql<{ id: string }[]>`insert into postex_accounts (key, label, store_id) values ('nur', 'NUR', ${s.nur}) returning id`;
+    const [serum, cream] = await variantsIn(s.schema.sql, s.nur, 2);
+    await s.schema.sql`insert into product_costs (variant_id, unit_cost_paisa, effective_from, source) values (${serum!}, '40000', '2026-01-01', 'manual'), (${cream!}, '25000', '2026-01-01', 'manual')`;
+
+    /** Lines are [variant or null, qty, line total in rupees]; the order total adds shipping on top. */
+    const deliveredOrder = async (number: string, total: number, lines: Array<[string | null, number, number]>, events: Array<[string, string]>) => {
+      const orderId = await orderWithLines(s.schema.sql, {
+        storeId: s.nur,
+        number,
+        placedAt: new Date('2026-09-01T05:00:00Z'),
+        totalPaisa: BigInt(total) * 100n,
+        lines: lines.map(([variantId, qty]) => ({ variantId, qty })),
+      });
+      for (const [i, [, , rupees]] of lines.entries()) {
+        await s.schema.sql`update order_lines set total_paisa = ${String(rupees * 100)} where order_id = ${orderId} and line_key = ${`line:${i}`}`;
+      }
+      const shipmentId = await parcel(s.schema.sql, { accountId: account!.id, orderId, events });
+      await s.schema.sql`update shipments set cod_amount_paisa = ${String(total * 100)} where id = ${shipmentId}`;
+      await reconcileShipmentStock(s.schema.sql, shipmentId);
+      await postShipmentAccounting(s.schema.sql, shipmentId);
+      return shipmentId;
+    };
+
+    // Rs 2,000 of serum and Rs 1,000 of cream, plus Rs 200 shipping: revenue 3,200 splits 2,133.33 / 1,066.67.
+    await deliveredOrder('#P1', 3200, [[serum!, 2, 2000], [cream!, 1, 1000]], [['0005', '2026-09-03T10:00:00Z']]);
+    // A custom item nobody linked to a product.
+    await deliveredOrder('#P2', 1500, [[serum!, 1, 1000], [null, 1, 500]], [['0005', '2026-09-04T10:00:00Z']]);
+    // Delivered in September, returned in October.
+    await deliveredOrder('#P3', 999, [[cream!, 3, 999]], [['0005', '2026-09-20T10:00:00Z'], ['0040', '2026-10-02T10:00:00Z']]);
+
+    const all = await productBreakdown(s.schema.sql);
+    const row = (key: string) => all.rows.find((r) => r.key === key)!;
+    assert.deepEqual([row(serum!).units, row(serum!).revenue, row(serum!).goods], [3, paisa(313_333n), rs(1200)]);
+    assert.deepEqual([row(cream!).units, row(cream!).revenue, row(cream!).goods], [1, paisa(106_667n), rs(250)], 'the return took its three units back out');
+    assert.deepEqual([row('unmapped').units, row('unmapped').revenue, row('unmapped').title], [1, rs(500), '(items not linked to a product)']);
+
+    for (const filter of [{}, { to: '2026-09-30' }, { from: '2026-10-01' }, { from: '2026-09-04', to: '2026-09-04' }, { store: 'organics' as const }]) {
+      const report = await productBreakdown(s.schema.sql, filter);
+      const ledger = await deliveredRevenue(s.schema.sql, filter);
+      assert.equal(report.revenue, ledger.parcels, `ledger revenue ${JSON.stringify(filter)}`);
+      assert.equal(report.rows.reduce((total, r) => total + r.revenue, 0n), report.revenue, `rows add up ${JSON.stringify(filter)}`);
+      assert.equal(report.rows.reduce((total, r) => total + r.goods, 0n), report.goods, `goods add up ${JSON.stringify(filter)}`);
+      const [cogs] = await s.schema.sql<{ v: string }[]>`
+        select coalesce(sum(debit_paisa - credit_paisa), 0)::text as v from ledger_lines l where l.account_code = '5000' and l.origin_type = 'shipment_cogs'
+          ${filter.from ? s.schema.sql`and l.entry_date >= ${filter.from}::date` : s.schema.sql``} ${filter.to ? s.schema.sql`and l.entry_date <= ${filter.to}::date` : s.schema.sql``}
+          ${filter.store ? s.schema.sql`and l.store_id = (select id from stores where key = ${filter.store})` : s.schema.sql``}
+      `;
+      assert.equal(report.goods, BigInt(cogs!.v), `ledger COGS ${JSON.stringify(filter)}`);
+    }
+    const october = await productBreakdown(s.schema.sql, { from: '2026-10-01' });
+    assert.deepEqual(october.rows.map((r) => [r.key, r.units, r.revenue]), [[cream!, -3, rs(-999)]], 'the return lands in October');
   });
 });

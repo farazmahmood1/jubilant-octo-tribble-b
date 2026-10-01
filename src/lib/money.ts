@@ -128,3 +128,27 @@ export function mul(amount: Paisa, factor: bigint | number | Ratio, rounding?: R
   }
   return paisa(amount * BigInt(factor));
 }
+
+/**
+ * Splits an amount across shares in proportion to `weights`, exactly: the parts always add up to
+ * the amount, to the paisa. Each part is rounded down and the paisa left over go one each to
+ * the largest remainders (earliest first on a tie), so the same inputs always split the same way.
+ * Equal shares when every weight is zero. A negative amount splits as its mirror image.
+ */
+export const allocate = (amount: Paisa, weights: readonly bigint[]): Paisa[] => {
+  if (weights.length === 0) throw new MoneyError('Cannot allocate across no shares');
+  if (weights.some((w) => w < 0n)) throw new MoneyError('Allocation weights cannot be negative');
+  if (amount < 0n) return allocate(paisa(-amount), weights).map((part) => paisa(-part));
+  const total = weights.reduce((t, w) => t + w, 0n);
+  const shares = total === 0n ? weights.map(() => 1n) : weights;
+  const of = total === 0n ? BigInt(weights.length) : total;
+  const parts = shares.map((w) => (amount * w) / of);
+  let left = amount - parts.reduce((t, p) => t + p, 0n);
+  const order = shares.map((w, i) => ({ i, remainder: (amount * w) % of })).sort((a, b) => (a.remainder === b.remainder ? a.i - b.i : a.remainder > b.remainder ? -1 : 1));
+  for (const { i } of order) {
+    if (left === 0n) break;
+    parts[i]! += 1n;
+    left -= 1n;
+  }
+  return parts.map(paisa);
+};

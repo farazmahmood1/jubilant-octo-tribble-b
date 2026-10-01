@@ -48,7 +48,7 @@ export const REPORT_PLANS: Record<string, ReportPlan> = {
   deliverySuccess: { plan: explainDeliverySuccess, needs: ['shipments_booked_idx'] },
   cashAwaitingPayout: { plan: explainCashAwaitingPayout, needs: ['journal_lines_account_idx', 'journal_entries_live_source_key'] },
   profitPerParcel: { plan: explainProfitPerParcel, needs: ['journal_entries_date_idx'] },
-  productBreakdown: { plan: explainProductBreakdown, needs: ['journal_entries_live_source_key', 'product_costs_lookup_idx'] },
+  productBreakdown: { plan: explainProductBreakdown, needs: ['journal_entries_date_idx', 'product_costs_lookup_idx'] },
   ...Object.fromEntries(
     DIMENSIONS.map((d: Dimension) => [
       `breakdown.${d}`,

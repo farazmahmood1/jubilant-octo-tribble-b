@@ -1,5 +1,6 @@
 /**
- * Re-derives every order's state, e.g. after the confirmation tags setting changes. Logs only
+ * Re-derives every order's confirmation and state, e.g. after the confirmation tags or desk
+ * settings change, and once after migration 0012 to create every order's confirmation. Logs only
  * the orders whose state moved. Run with: npm run orders:states
  */
 import { closeDb, db } from '../db.js';

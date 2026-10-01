@@ -5,8 +5,9 @@ import { type ReportFilter, ledgerWhere, prefix } from './filter.js';
 /**
  * Delivered revenue: the Sales revenue account (4000), which only the shipment-delivered handler
  * and consignment sales post to (BUILD-PLAN 1.6). A parcel placed, confirmed, booked or in
- * transit has no line here; a parcel delivered and then returned has its sale and the reversal,
- * which net to zero. PR parcels never post a sale.
+ * transit has no line here; a parcel delivered and then returned has its sale (in the delivery's
+ * period) and the reversal (in the return's), however late the sync first saw it. PR parcels
+ * never post a sale.
  */
 export interface DeliveredRevenue {
   /** From parcels delivered by PostEx. */

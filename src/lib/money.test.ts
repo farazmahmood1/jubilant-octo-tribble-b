@@ -8,6 +8,7 @@ import {
   type Rounding,
   ZERO,
   add,
+  allocate,
   fromNumber,
   fromRupeeString,
   mul,
@@ -161,6 +162,22 @@ describe('mul', () => {
 
   it('refuses a zero denominator', () => {
     assert.throws(() => ratio(1n, 0n), MoneyError);
+  });
+});
+
+describe('allocate', () => {
+  it('splits in proportion and always adds back to the amount, to the paisa', () => {
+    assert.deepEqual(allocate(paisa(1000n), [1n, 1n, 1n]), [334n, 333n, 333n]);
+    assert.deepEqual(allocate(paisa(275_000n), [200_000n, 50_000n]), [220_000n, 55_000n]);
+    assert.deepEqual(allocate(paisa(-1000n), [1n, 1n, 1n]), [-334n, -333n, -333n], 'a reversal splits as the mirror of its sale');
+    assert.deepEqual(allocate(paisa(5n), [0n, 0n]), [3n, 2n], 'equal shares when every weight is zero');
+    assert.deepEqual(allocate(paisa(10n), [1n, 2n, 0n]), [3n, 7n, 0n], 'largest remainder first');
+    for (let amount = 0n; amount < 300n; amount += 7n) {
+      const parts = allocate(paisa(amount), [3n, 5n, 11n, 0n, 1n]);
+      assert.equal(parts.reduce((t, p) => t + p, 0n), amount);
+    }
+    assert.throws(() => allocate(paisa(1n), []), MoneyError);
+    assert.throws(() => allocate(paisa(1n), [-1n]), MoneyError);
   });
 });
 

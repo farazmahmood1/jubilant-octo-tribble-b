@@ -172,7 +172,8 @@ location, and are audited. Order lines with no catalogue variant cannot move and
 `src/domain/reconciliation.ts` and keeps `reconciliation_items` equal to what they find:
 unmatched parcel, COD different from what the order should collect (nothing on a paid order),
 possible duplicate booking (two live parcels for one order), stuck in transit (no status change
-for `alerts.stuckDays`, default 7, Karachi days) and unknown PostEx status code. A re-run adds
+for `alerts.stuckDays`, default 7, Karachi days) and unknown PostEx status code. It also runs the
+Confirmation Desk's two order rules (see *Confirmation Desk*). A re-run adds
 nothing; an item a person resolved or ignored is never reopened; an item whose condition clears
 is closed by the system. Every close is in `audit_log`.
 
@@ -194,14 +195,60 @@ dashboard's Reconciliation page; the next `postex:sync` re-tries every unmatched
 
 ## Order state
 
-`orders.state` is written only by `recomputeOrderState()`, after a Shopify order is stored and
-after a parcel's status or order link changes; every change is logged in `order_state_log` with
-its reason. Until the Confirmation Desk exists, confirmation comes from the Shopify tags the
-teams use, compared by their words (emoji and case ignored): `Order Confirmed`, `COD-Confirmed`;
+`orders.state` is written only by `recomputeOrderState()`, after a Shopify order is stored, after
+a parcel's status or order link changes, and after a desk attempt; every change is logged in
+`order_state_log` with its reason. The confirmation it reads is the order's `confirmations` row
+(see *Confirmation Desk*). Before the desk's first attempt on an order, that row follows the
+Shopify tags the teams used, compared by their words (emoji and case ignored): `Order Confirmed`, `COD-Confirmed`;
 `Order Canceled`; `Confirmation Pending`, `COD-Needs-Review`; `didnt answer the call`, `call not attended`, `didnt confirm`
 (no answer); `number off`, `No Phone`, `NO WhatsApp` (unreachable). "On hold" is Shopify's own
 fulfillment status, not a tag. Change the list with `GET|PUT /api/v1/settings/confirmation-tags`,
-then run `npm run orders:states` to re-derive every order.
+then run `npm run orders:states` to re-derive every order. Run it once after deploying migration
+0012 too: it creates the `confirmations` row of every existing order.
+
+## Confirmation Desk
+
+Agents work orders from a queue; what they record is the fact, and everything else follows from
+it (migration `0012_confirmation_desk.sql`, rules in `src/domain/confirmation.ts`):
+
+- `confirmation_attempts` is append-only: each WhatsApp message or call, its outcome
+  (`confirmed`, `changed`, `cancelled`, `no_answer`, `callback`, `wrong_number`, or `rescheduled`
+  for a follow-up set without contact), and the agent. GDPR redaction may clear its free text.
+- `confirmations` (one per online order) is recomputed from the attempts on every change: its
+  state, attempt count and next due time. A no-answer is retried after `retryMinutes` (default 60,
+  then 180), moved into desk hours (default 10:00–22:00 Karachi); the `maxAttempts`th (default 3)
+  makes it `unreachable`. A callback is due at the customer's time. The last decision wins.
+- Every attempt writes `audit_log` with the agent; the order's state is recomputed with it.
+- Customer history is looked up by `customers.phone_e164` across both brands: delivered vs
+  refused (sent back) counts, and the return rate of parcels to the order's city.
+- The WhatsApp button is a `https://wa.me/<number>?text=…` click-to-chat link from the brand's
+  template; nothing is sent by the platform. Templates take `{name}`, `{firstName}`,
+  `{orderNumber}`, `{total}`, `{items}`, `{city}`, `{store}`; an unknown placeholder is refused.
+- Two alerts, raised and cleared by `reconciliation:scan`: `confirmed_not_booked` (confirmed
+  `alerts.confirmedNotBookedHours`, default 24, ago with no parcel; not for orders on hold in
+  Shopify, nor placed more than `alerts.confirmedLookbackDays`, default 30, ago) and
+  `cancelled_but_booked` (cancelled in Shopify or at the desk, with a parcel still out; an error
+  when it was delivered).
+- The accountant role gets no phone number or contact link from these routes (1.9).
+
+API (signed in): `GET /api/v1/confirmations/queue?state=&store=&due=now|all&search=&page=&pageSize=`,
+`GET /api/v1/confirmations/orders/:orderId` (with the customer's history),
+`GET /api/v1/confirmations/history?phone=&city=`, `POST /api/v1/confirmations/orders/:orderId/attempts`
+(`channel`, `outcome`, `reason`, `note`, `followUpAt`), `POST /api/v1/confirmations/orders/:orderId/follow-up`
+(`at`, `note`), `GET /api/v1/confirmations/agents?from=&to=`, `GET /api/v1/confirmations/alerts`,
+`GET|PUT /api/v1/settings/confirmation-desk`.
+
+## Influencers
+
+`influencers` and `influencer_codes` (migration `0013_influencers.sql`): who the influencers are
+and which discount codes are theirs, per store, matched in any case. The influencer breakdown
+attributes an order to the owner of the first of its codes in the order's store; an order whose
+codes nobody owns groups under its first code, marked unassigned. Assigning a code re-attributes
+past orders too. Every change is audited.
+
+API (signed in): `GET|POST /api/v1/influencers`, `PATCH /api/v1/influencers/:id`,
+`POST /api/v1/influencers/:id/codes` (`store`, `code`), `DELETE /api/v1/influencers/:id/codes/:codeId`,
+`GET /api/v1/influencers/unassigned-codes?store=` (codes customers used that nobody owns, most used first).
 
 ## Accounting
 
@@ -217,6 +264,13 @@ debits and credits differ, at commit; entries are never edited, a correction is 
   `claimPostexInputTax`) / COD receivable. A corrected fee is reversed and re-posted.
 - **Returned after delivery**: the sale and COGS are reversed, dated by the return; both charges
   stay. **Refused**, never delivered: there was no sale, so only the charges post.
+- **The history decides, not the sync's timing.** Sale and COGS follow the parcel's delivery
+  episodes from its PostEx history: posted on the delivery day, reversed on the day a return
+  undid it, and posted again if it is delivered again (`journal_entries.occurrence`, 0011). A
+  parcel first seen already returned gets the same sale and reversal, on the same days, as one
+  watched live, so a replay and the live run write the same ledger. An entry whose day moved
+  (the step that dates it arrived after its amounts) is re-dated by a same-day reversal, unless
+  its month is closed.
 - **COD payout**: bank / COD receivable, per payout line. **Damaged return**: write-off / inventory.
 - Vendor bills and payments, consignment sales and partner payments have posting functions for
   when their screens land.
@@ -276,12 +330,15 @@ payout) and its parcel, with a reversal carrying its original's origin so the tw
 | `returnRate`, `deliverySuccess` | parcels booked in the period, PR parcels excluded; returned ÷ delivered-or-returned; delivered ÷ final outcomes, and first-attempt share |
 | `cashAwaitingPayout` | COD receivable per parcel at the end of the period, aged 0–7 / 8–14 / 15–30 / 31+ days since delivery; charges on parcels with no sale apart |
 | `profitPerParcel` | each parcel's own lines: revenue − goods − PostEx charges − marketing − write-off |
-| `breakdown` | the same lines by store (brand), month, city, partner, influencer code or agent; rows add up to the P&L |
-| `productBreakdown` | units and item sales from order lines on delivered parcels (the ledger has one sale per parcel) |
+| `breakdown` | the same lines by store (brand), month, city, partner, influencer (via `influencer_codes`) or the desk agent who confirmed the order; rows add up to the P&L |
+| `productBreakdown` | each parcel's revenue and COGS lines split across its order's items (by line price, and by units × cost), exactly to the paisa, so the rows add up to the parcels' revenue and COGS; units are net of returns |
 | `trialBalanceReport`, `generalLedger`, `partnerLedger` | opening, period movements and closing per account / line / counterparty |
 
 `REPORT_PLANS` lists each report's query plan and the indexes it must use; a test runs every
 plan with sequential scans disabled and checks it.
+
+API (signed in): `GET /api/v1/reports/breakdowns/:dimension?from=&to=&store=` and
+`.../:dimension/drill?key=`, `GET /api/v1/reports/products` and `/reports/products/drill?key=`.
 
 ## Worker schedule
 
