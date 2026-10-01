@@ -138,6 +138,7 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
     await assert.rejects(attempt(id, 'cancelled', '2026-09-01T07:00:00Z'), /Say why the customer cancelled/);
     await assert.rejects(attempt(id, 'callback', '2026-09-01T07:00:00Z'), /needs a time/);
     await assert.rejects(attempt(id, 'rescheduled', '2026-09-01T07:00:00Z', { followUpAt: new Date('2026-09-01T06:00:00Z') }), /must be in the future/);
+    await assert.rejects(attempt(id, 'cancelled', '2026-08-31T07:00:00Z', { reason: 'x' }), /before the order was placed/);
     const pr = await newOrder({ channel: 'pr', phone: '+923000000305' });
     await assert.rejects(attempt(pr, 'confirmed', '2026-09-01T07:00:00Z'), /pr order is not confirmed by the desk/);
     const gone = await newOrder({ phone: '+923000000306' });

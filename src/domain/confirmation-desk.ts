@@ -58,13 +58,14 @@ export interface AttemptResult {
  */
 export const recordAttempt = async (db: Db, input: AttemptInput): Promise<AttemptResult> =>
   atomically(db, async (tx) => {
-    const [order] = await tx<{ channel: string; cancelled_at: Date | null; booked: boolean }[]>`
-      select channel, cancelled_at, exists (select 1 from shipments s where s.order_id = o.id) as booked
+    const [order] = await tx<{ channel: string; cancelled_at: Date | null; placed_at: Date; booked: boolean }[]>`
+      select channel, cancelled_at, placed_at, exists (select 1 from shipments s where s.order_id = o.id) as booked
       from orders o where id = ${input.orderId} for update
     `;
     if (!order) throw new DeskError(`Order ${input.orderId} not found`, 404);
     if (order.channel !== 'online') throw new DeskError(`A ${order.channel} order is not confirmed by the desk`);
     if (order.cancelled_at) throw new DeskError('The order is cancelled in Shopify');
+    if (input.at.getTime() < order.placed_at.getTime()) throw new DeskError('An attempt cannot be dated before the order was placed');
 
     const rescheduling = input.outcome === 'rescheduled';
     if (rescheduling !== (input.channel === null)) {
