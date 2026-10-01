@@ -51,6 +51,7 @@ src/
   config.ts                 environment loading and validation (zod)
   logger.ts                 pino, with credentials redacted
   lib/                      money (paisa), Karachi time, phone normalisation
+  domain/                   pure business rules: shipment-to-order matching
   db.ts                     Neon connection (TLS required except on localhost), health check
   db/                       migration runner, migrations/NNNN_name.sql, seed from config
   http/routes/              health, integrations status
