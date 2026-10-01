@@ -1,0 +1,64 @@
+{
+  "_fixture": "SYNTHETIC. Built from the field names verified in CLAUDE.md and src/integrations/postex/types.ts, not recorded. Replace with a masked recording of the same name.",
+  "statusCode": "200",
+  "statusMessage": "SUCCESSFULLY OPERATED",
+  "dist": [
+    {
+      "trackingNumber": "20000000000001",
+      "trackingResponse": {
+        "trackingNumber": "20000000000001",
+        "orderRefNumber": "#10001",
+        "transactionStatus": "Delivered",
+        "transactionDate": "2026-06-25 18:05:11",
+        "orderDeliveryDate": "2026-06-27 16:00:00",
+        "statusUpdatedAt": "2026-06-27 16:00:00",
+        "invoicePayment": 2750,
+        "transactionFee": 180,
+        "transactionTax": 28.8,
+        "reversalFee": 0,
+        "reversalTax": 0,
+        "cityName": "Lahore",
+        "items": 2,
+        "customerName": "[masked]",
+        "customerPhone": "[masked]",
+        "deliveryAddress": "[masked]"
+      }
+    },
+    {
+      "trackingNumber": "20000000000005",
+      "trackingResponse": {
+        "trackingNumber": "20000000000005",
+        "orderRefNumber": "PR-INF-01",
+        "transactionStatus": "Delivered",
+        "transactionDate": "2026-07-03 12:00:00",
+        "orderDeliveryDate": "2026-07-05 13:00:00",
+        "statusUpdatedAt": "2026-07-05 13:00:00",
+        "invoicePayment": 0,
+        "transactionFee": 180,
+        "transactionTax": 28.8,
+        "cityName": "Islamabad",
+        "items": 3,
+        "customerName": "[masked]",
+        "customerPhone": "[masked]",
+        "deliveryAddress": "[masked]"
+      }
+    },
+    {
+      "trackingNumber": "20000000000003",
+      "trackingResponse": {
+        "trackingNumber": "20000000000003",
+        "orderRefNumber": "#10003",
+        "transactionStatus": "Booked",
+        "transactionDate": "2026-09-18 21:40:00",
+        "orderDeliveryDate": null,
+        "statusUpdatedAt": null,
+        "invoicePayment": 1999.5,
+        "cityName": "Karachi",
+        "items": 1,
+        "customerName": "[masked]",
+        "customerPhone": "[masked]",
+        "deliveryAddress": "[masked]"
+      }
+    }
+  ]
+}

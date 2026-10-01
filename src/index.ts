@@ -1,7 +1,16 @@
 import { createApp } from './app.js';
 import { config, isShopifyStoreReady } from './config.js';
 import { closeDb } from './db.js';
+import { prepareDatabase } from './db/prepare.js';
 import { logger } from './logger.js';
+
+try {
+  await prepareDatabase();
+} catch (error) {
+  logger.fatal({ err: error }, 'Database preparation failed; not starting');
+  await closeDb().catch(() => {});
+  process.exit(1);
+}
 
 const server = createApp().listen(config.port, () => {
   logger.info(

@@ -37,6 +37,12 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CORS_ORIGIN: z.string().default('*'),
   DATABASE_URL: z.string().min(1).optional(),
+  // On by default so a fresh deploy creates its tables; off to start against a database whose
+  // migrations are applied by hand.
+  DB_MIGRATE_ON_BOOT: z
+    .string()
+    .optional()
+    .transform((v) => v?.toLowerCase() !== 'false'),
   SHOPIFY_API_VERSION: z.string().default('2026-07'),
   // Temporary single-user sign-in. Replaced by real accounts (users table, argon2 hashes, roles)
   // once the schema exists.
@@ -118,6 +124,7 @@ export const config = {
   logLevel: values.LOG_LEVEL,
   corsOrigin: values.CORS_ORIGIN === '*' ? '*' : values.CORS_ORIGIN.split(',').map((o) => o.trim()),
   databaseUrl: values.DATABASE_URL,
+  migrateOnBoot: values.DB_MIGRATE_ON_BOOT,
   shopify: {
     apiVersion: values.SHOPIFY_API_VERSION,
     stores: [

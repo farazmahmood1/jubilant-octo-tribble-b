@@ -1,0 +1,29 @@
+{
+  "_fixture": "SYNTHETIC. Built from the field names verified in CLAUDE.md and src/integrations/postex/types.ts, not recorded. Replace with a masked recording of the same name.",
+  "statusCode": "200",
+  "statusMessage": "SUCCESSFULLY OPERATED",
+  "dist": {
+    "trackingNumber": "20000000000001",
+    "orderRefNumber": "#10001",
+    "transactionStatus": "Delivered",
+    "transactionDate": "2026-06-25 18:05:11",
+    "orderPickupDate": "2026-06-26 10:12:40",
+    "orderDeliveryDate": "2026-06-27 16:00:00",
+    "statusUpdatedAt": "2026-06-27 16:00:00",
+    "invoicePayment": 2750,
+    "transactionFee": 180,
+    "transactionTax": 28.8,
+    "reversalFee": 0,
+    "reversalTax": 0,
+    "cityName": "Lahore",
+    "items": 2,
+    "invoiceDivision": 1,
+    "customerName": "[masked]",
+    "customerPhone": "[masked]",
+    "deliveryAddress": "[masked]",
+    "transactionStatusHistory": [
+      { "transactionStatusMessage": "Delivered", "transactionStatusMessageCode": "0005", "updatedAt": "2026-06-27 16:00:00" },
+      { "transactionStatusMessage": "Attempt Made: CNA(CUSTOMER NOT AVAILABLE)", "transactionStatusMessageCode": "0013", "updatedAt": "2026-06-26 19:41:03" }
+    ]
+  }
+}

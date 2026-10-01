@@ -1,0 +1,13 @@
+{
+  "_fixture": "SYNTHETIC. Built from the field names verified in CLAUDE.md and src/integrations/postex/types.ts, not recorded. Replace with a masked recording of the same name.",
+  "statusCode": "200",
+  "statusMessage": "SUCCESSFULLY OPERATED",
+  "dist": {
+    "orderRefNumber": "#10001",
+    "trackingNumber": "20000000000001",
+    "settle": true,
+    "settlementDate": "2026-07-02 11:00:00",
+    "cpr1": "CPR-0000000123",
+    "cpr1Date": "2026-07-02 11:00:00"
+  }
+}

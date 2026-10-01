@@ -1,0 +1,18 @@
+{
+  "_fixture": "SYNTHETIC. Shopify REST webhook shape (what webhooks deliver), not recorded; PII masked.",
+  "id": 1001,
+  "admin_graphql_api_id": "gid://shopify/Order/1001",
+  "name": "#1001",
+  "email": "[masked]",
+  "phone": "[masked]",
+  "created_at": "2026-09-30T10:00:00+05:00",
+  "updated_at": "2026-09-30T10:00:00+05:00",
+  "financial_status": "pending",
+  "total_price": "1250.00",
+  "currency": "PKR",
+  "tags": "",
+  "note": "[masked]",
+  "customer": { "id": 77, "first_name": "[masked]", "last_name": "[masked]", "phone": "[masked]", "email": "[masked]" },
+  "shipping_address": { "first_name": "[masked]", "last_name": "[masked]", "address1": "[masked]", "city": "Lahore", "zip": "[masked]", "phone": "[masked]", "country_code": "PK" },
+  "line_items": [{ "id": 10010, "variant_id": null, "title": "Item 10010", "quantity": 1, "price": "1000.00" }]
+}

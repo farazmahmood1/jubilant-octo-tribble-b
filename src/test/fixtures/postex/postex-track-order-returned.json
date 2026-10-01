@@ -1,0 +1,30 @@
+{
+  "_fixture": "SYNTHETIC. Built from the field names verified in CLAUDE.md and src/integrations/postex/types.ts, not recorded. Replace with a masked recording of the same name.",
+  "statusCode": "200",
+  "statusMessage": "SUCCESSFULLY OPERATED",
+  "dist": {
+    "trackingNumber": "20000000000002",
+    "orderRefNumber": "#10002",
+    "transactionStatus": "Returned",
+    "transactionDate": "2026-05-20 12:00:00",
+    "orderDeliveryDate": null,
+    "statusUpdatedAt": "2026-06-01T09:15:00",
+    "invoicePayment": 3200,
+    "transactionFee": 0,
+    "transactionTax": 0,
+    "reversalFee": 237,
+    "reversalTax": 37.92,
+    "cityName": "Faisalabad",
+    "items": 1,
+    "invoiceDivision": 1,
+    "customerName": "[masked]",
+    "customerPhone": "[masked]",
+    "deliveryAddress": "[masked]",
+    "transactionStatusHistory": [
+      { "transactionStatusMessage": "Attempt Made: RFD(REFUSED TO RECEIVE)", "transactionStatusMessageCode": "0013", "updatedAt": "2026-05-21 14:30:00" },
+      { "transactionStatusMessage": "Attempt Made: RFD(REFUSED TO RECEIVE)", "transactionStatusMessageCode": "0013", "updatedAt": "2026-05-22 13:10:00" },
+      { "transactionStatusMessage": "Return Initiated", "transactionStatusMessageCode": "0040", "updatedAt": "2026-05-23 10:00:00" },
+      { "transactionStatusMessage": "Returned to merchant warehouse", "transactionStatusMessageCode": "0006", "updatedAt": "2026-06-01T09:15:00" }
+    ]
+  }
+}

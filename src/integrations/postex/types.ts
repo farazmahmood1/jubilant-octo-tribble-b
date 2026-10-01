@@ -53,15 +53,6 @@ export interface PostexPaymentStatus {
   cpr1Date?: string;
 }
 
-export interface PostexShipperAdvice {
-  trackingNumber?: string;
-  orderRefNumber?: string;
-  remarks?: string;
-  remarksDate?: string;
-  username?: string;
-  invoicePayment?: number;
-}
-
 /** Status ids accepted by get-all-order. 0 lists everything. */
 export const POSTEX_STATUS_IDS = {
   all: 0,
