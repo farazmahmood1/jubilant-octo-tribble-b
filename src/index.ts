@@ -1,27 +1,8 @@
 import { createApp } from './app.js';
 import { config, isShopifyStoreReady } from './config.js';
-import { closeDb, db } from './db.js';
-import { migrate } from './db/migrate.js';
-import { seed } from './db/seed.js';
+import { closeDb } from './db.js';
+import { prepareDatabase } from './db/prepare.js';
 import { logger } from './logger.js';
-
-/**
- * Brings the schema up to date and registers the configured stores and PostEx accounts before
- * any request is served. Both steps are idempotent and lock-protected, so the web service and
- * the worker can run this at the same time. A refusal (an applied migration was edited) stops
- * the process: serving on a schema that does not match the code is worse than not serving.
- */
-const prepareDatabase = async (): Promise<void> => {
-  const sql = db();
-  if (!sql) return;
-  if (!config.migrateOnBoot) {
-    logger.info('DB_MIGRATE_ON_BOOT is false; skipping migrations and seeding');
-    return;
-  }
-  const applied = await migrate(sql);
-  const seeded = await seed(sql);
-  logger.info({ migrationsApplied: applied.map((m) => m.file), seeded }, 'Database ready');
-};
 
 try {
   await prepareDatabase();

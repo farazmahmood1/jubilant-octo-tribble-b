@@ -23,6 +23,8 @@ npm run verify           # read-only connection check for Neon, Shopify and Post
 | `npm run migrate` | Applies pending migrations from `src/db/migrations/`; refuses if an applied file changed |
 | `npm run migrate:status` | Applied, pending, changed or missing, per migration; exits 1 on changed or missing |
 | `npm run migrate:prod` | Same as `migrate`, from the compiled build, without `tsx` |
+| `npm run dev:worker` / `npm run start:worker` | Background worker (scheduler) from source with reload, or from `dist/` (Render worker) |
+| `npm run job -- <name>` | Runs one job once and exits: 0 succeeded, 1 failed, 2 unknown job, 3 already running elsewhere |
 | `npm run seed` | Upserts `stores` and `postex_accounts` from config; safe to repeat |
 
 ## Configuration
@@ -46,11 +48,13 @@ values: `SHOPIFY_*` and `POSTEX_TOKEN` for NUR by Juggun, `SHOPIFY_ORGANICS_*` a
 
 ```
 src/
-  index.ts                  start-up, graceful shutdown
+  index.ts                  web service: start-up, graceful shutdown
+  index.worker.ts           background worker: runs the job scheduler
   app.ts                    Express app: helmet, CORS, JSON, request logging, routes
   config.ts                 environment loading and validation (zod)
   logger.ts                 pino, with credentials redacted
   lib/                      money (paisa), Karachi time, phone normalisation
+  jobs/                     job runner (lock, sync_runs, scheduler) and the job registry
   domain/                   pure business rules: shipment-to-order matching, order state
   db.ts                     Neon connection (TLS required except on localhost), health check
   db/                       migration runner, migrations/NNNN_name.sql, seed from config

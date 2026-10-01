@@ -47,3 +47,31 @@ export const createTestSchema = async (): Promise<TestSchema> => {
     },
   };
 };
+
+export interface TestDatabase {
+  url: string;
+  drop: () => Promise<void>;
+}
+
+/**
+ * A whole throwaway database, for tests that start a child process (a CLI) which connects with
+ * its own DATABASE_URL and so cannot be pointed at a schema.
+ */
+export const createTestDatabase = async (): Promise<TestDatabase> => {
+  if (!url) throw new Error('DATABASE_URL_TEST is not set');
+  if (/\.neon\.tech$/i.test(new URL(url).hostname)) {
+    throw new Error('DATABASE_URL_TEST points at Neon; use a scratch Postgres instead');
+  }
+  const name = `test_${randomBytes(6).toString('hex')}`;
+  const admin = postgres(url, { ...sslOptions(url), max: 1, onnotice: () => {} });
+  await admin`create database ${admin(name)}`;
+  const target = new URL(url);
+  target.pathname = `/${name}`;
+  return {
+    url: target.toString(),
+    drop: async () => {
+      await admin`drop database if exists ${admin(name)} with (force)`;
+      await admin.end({ timeout: 5 });
+    },
+  };
+};

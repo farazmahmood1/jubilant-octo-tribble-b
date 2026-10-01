@@ -19,7 +19,10 @@
     "migrate:status": "tsx src/scripts/migrate.ts status",
     "seed": "tsx src/scripts/migrate.ts seed",
     "prebuild": "node scripts/dist.mjs clean",
-    "migrate:prod": "node dist/scripts/migrate.js"
+    "migrate:prod": "node dist/scripts/migrate.js",
+    "job": "tsx src/scripts/job.ts",
+    "dev:worker": "tsx watch src/index.worker.ts",
+    "start:worker": "node dist/index.worker.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
