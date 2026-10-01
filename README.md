@@ -74,6 +74,25 @@ from config before serving. Both steps are idempotent and lock-protected, so the
 the worker can start together. If an applied migration was edited, the process refuses to start.
 Set `DB_MIGRATE_ON_BOOT=false` to manage the schema by hand with `npm run migrate`.
 
+## Shopify syncs
+
+Two jobs fill the catalogue and the last 60 days of orders from both stores:
+
+```bash
+npm run job -- shopify:catalogue   # every product and variant; hourly on the worker
+npm run job -- shopify:orders      # orders updated since the saved cursor; every 15 minutes
+```
+
+Each prints its stats as totals and per store (`nur.fetched`, `organics.inserted`, ...):
+`fetched`, `inserted`, `updated`, `changed`, `skipped`, plus `unmappedSkus` (variants with no
+SKU) and `unmappedLines` (order lines whose variant is not in the catalogue yet). Run the
+catalogue first so order lines link to their variants.
+
+The order cursor (`integration_cursors`, job `shopify:orders`) is the newest `updatedAt`
+stored, saved after every page. A run that stops part-way resumes there; a second run re-reads
+only the last 10 minutes and inserts nothing. Skipped items are logged by order name or variant
+id only, never with customer data.
+
 ## Tests and fixtures
 
 Tests sit next to the code as `*.test.ts` and run with `node:test` through `tsx`, so there is no

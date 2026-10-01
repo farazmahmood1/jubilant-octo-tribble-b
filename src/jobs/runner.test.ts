@@ -305,7 +305,7 @@ describe('npm run job CLI', { skip: skipWithoutDb }, () => {
   it('exits 2 for an unknown job, or no job name, and lists the jobs', () => {
     const unknown = cli(migrated.url, 'no.such.job');
     assert.equal(unknown.status, 2);
-    assert.match(unknown.stderr, /Unknown job "no\.such\.job"\. Known jobs: system\.heartbeat/);
+    assert.match(unknown.stderr, /Unknown job "no\.such\.job"\. Known jobs: .*system\.heartbeat/);
     const missing = cli(migrated.url);
     assert.equal(missing.status, 2);
     assert.match(missing.stderr, /Usage: npm run job -- <name>/);

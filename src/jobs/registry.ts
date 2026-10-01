@@ -1,9 +1,9 @@
 import type { JobDefinition } from './runner.js';
+import { shopifyJobs } from './shopify.js';
 
 /**
  * Every background job the worker runs. Sync jobs are added here by the tasks that build them;
- * until then the worker runs only the heartbeat, which proves the scheduler, the lock and
- * sync_runs end to end.
+ * the heartbeat proves the scheduler, the lock and sync_runs end to end on its own.
  */
 export const jobs: JobDefinition[] = [
   {
@@ -16,4 +16,5 @@ export const jobs: JobDefinition[] = [
       return { databaseMs: Date.now() - startedAt };
     },
   },
+  ...shopifyJobs,
 ];
