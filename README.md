@@ -42,6 +42,7 @@ values: `SHOPIFY_*` and `POSTEX_TOKEN` for NUR by Juggun, `SHOPIFY_ORGANICS_*` a
 | --- | --- |
 | `GET /health` | Liveness: the process is up |
 | `GET /ready` | Readiness: database reachable and every migration applied unchanged (503 otherwise) |
+| `POST /webhooks/shopify/:topic` | Shopify webhooks, HMAC-verified over the raw body; `:topic` is the topic with `-` for `/` |
 | `GET /api/v1/integrations/status` | Which stores and PostEx accounts are configured. Never returns a credential |
 
 ## Layout
@@ -55,6 +56,8 @@ src/
   logger.ts                 pino, with credentials redacted
   lib/                      money (paisa), Karachi time, phone normalisation
   jobs/                     job runner (lock, sync_runs, scheduler) and the job registry
+  webhooks/                 Shopify webhook verification and processing
+  gdpr/                     redaction for Shopify's GDPR webhooks
   domain/                   pure business rules: shipment-to-order matching, order state
   db.ts                     Neon connection (TLS required except on localhost), health check
   db/                       migration runner, migrations/NNNN_name.sql, seed from config
@@ -92,6 +95,32 @@ The order cursor (`integration_cursors`, job `shopify:orders`) is the newest `up
 stored, saved after every page. A run that stops part-way resumes there; a second run re-reads
 only the last 10 minutes and inserts nothing. Skipped items are logged by order name or variant
 id only, never with customer data.
+
+## Shopify webhooks
+
+`POST /webhooks/shopify/<topic>` receives `orders/create`, `orders/updated`, `orders/cancelled`,
+`fulfillments/create`, `fulfillments/update`, `refunds/create` and the three GDPR topics
+(`customers/data_request`, `customers/redact`, `shop/redact`).
+
+- **Signature.** Each delivery is verified with the store app's client secret
+  (`SHOPIFY_CLIENT_SECRET` / `SHOPIFY_ORGANICS_CLIENT_SECRET`) over the raw bytes. The route has
+  its own raw parser and is mounted before `express.json()`; a bad signature gets 401 and is
+  logged without its body.
+- **Once only.** Deliveries are stored in `webhook_events` keyed by `X-Shopify-Event-Id`, so a
+  repeat is acknowledged and not processed again.
+- **Fast answer.** The 200 is sent before processing. Order, fulfillment and refund events
+  re-fetch the order through GraphQL and store it like the sync does.
+- **GDPR.** Redaction scrubs names, phones, street addresses and postcodes from the tables and from
+  the raw payloads, and is audited; a data request is queued for a person.
+- **`shopify:catchup`** (every 15 minutes) processes stuck events, retries skipped orders from the
+  review queue, and re-reads the last two hours of orders, which recovers a webhook Shopify never
+  delivered.
+
+**Registering them (done locally, per store):** in the Dev Dashboard app configuration, subscribe
+each topic to `https://<public host>/webhooks/shopify/<topic with - for />`, e.g.
+`/webhooks/shopify/orders-create`, and set the three compliance webhooks to
+`/webhooks/shopify/customers-data_request`, `/webhooks/shopify/customers-redact` and
+`/webhooks/shopify/shop-redact`. While the backend runs on localhost, the public host is a tunnel.
 
 ## Tests and fixtures
 

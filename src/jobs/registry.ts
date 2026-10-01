@@ -1,5 +1,6 @@
 import type { JobDefinition } from './runner.js';
 import { shopifyJobs } from './shopify.js';
+import { catchupJob } from './shopify-catchup.js';
 
 /**
  * Every background job the worker runs. Sync jobs are added here by the tasks that build them;
@@ -17,4 +18,5 @@ export const jobs: JobDefinition[] = [
     },
   },
   ...shopifyJobs,
+  catchupJob,
 ];

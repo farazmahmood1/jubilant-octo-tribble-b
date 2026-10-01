@@ -65,7 +65,8 @@ export const upsertVariant = async (db: Db, input: VariantInput): Promise<Upsert
     values (${input.storeId}, ${input.productId}, ${big(input.shopifyVariantId)}, ${blankToNull(input.sku)},
             ${input.title}, ${blankToNull(input.barcode)})
     on conflict (store_id, shopify_variant_id) do update
-      set product_id = excluded.product_id, sku = excluded.sku, title = excluded.title, barcode = excluded.barcode
+      set product_id = excluded.product_id, sku = excluded.sku, title = excluded.title, barcode = excluded.barcode,
+          deleted_at = null
     returning id, (xmax = 0) as inserted, (select doc from prev) is distinct from (to_jsonb(variants) - 'updated_at') as changed
   `;
   return toUpsertResult(row);
@@ -78,10 +79,13 @@ export const findVariant = async (db: Db, storeId: string, shopifyVariantId: big
   return row ? toRow(row) : null;
 };
 
-/** The "unmapped variants" screen: variants with no SKU, which stock cannot be tracked by yet. */
+/**
+ * The "unmapped variants" screen: live variants with no SKU, which stock cannot be tracked by
+ * yet. Variants deleted in Shopify are left out: there is nothing left to map.
+ */
 export const listUnmappedVariants = async (db: Db, storeId: string): Promise<VariantRow[]> => {
   const rows = await db<RawVariant[]>`
-    select ${db.unsafe(COLUMNS)} from variants where store_id = ${storeId} and sku is null order by id
+    select ${db.unsafe(COLUMNS)} from variants where store_id = ${storeId} and sku is null and deleted_at is null order by id
   `;
   return rows.map(toRow);
 };

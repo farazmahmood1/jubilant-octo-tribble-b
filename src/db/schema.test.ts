@@ -41,7 +41,7 @@ describe('schema', { skip: skipWithoutDb }, () => {
     return rows.map((r) => String(r['column_name']));
   };
 
-  it('creates exactly the Batch A, B and C tables', async () => {
+  it('creates exactly the expected tables', async () => {
     const rows = await schema.sql`
       select table_name from information_schema.tables where table_schema = ${schema.name} order by table_name
     `;
@@ -49,7 +49,7 @@ describe('schema', { skip: skipWithoutDb }, () => {
       rows.map((r) => r['table_name']),
       [
         'addresses', 'app_settings', 'audit_log', 'customers', 'integration_cursors', 'order_lines', 'order_state_log',
-        'orders', 'postex_accounts', 'product_costs', 'products', 'schema_migrations', 'stores', 'sync_runs', 'users',
+        'orders', 'postex_accounts', 'product_costs', 'products', 'reconciliation_items', 'schema_migrations', 'stores', 'sync_runs', 'users',
         'variants', 'webhook_events',
       ],
     );

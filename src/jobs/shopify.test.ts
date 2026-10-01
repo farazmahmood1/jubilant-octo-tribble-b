@@ -93,6 +93,32 @@ describe('shopify:catalogue', { skip: skipWithoutDb }, () => {
     const [row] = await s.schema.sql<{ n: number }[]>`select count(*)::int as n from variants where sku = 'NBJ-7'`;
     assert.equal(row?.n, 1);
   });
+
+  it('marks a product and its variants deleted when Shopify no longer has them, and stops counting them as unmapped', async () => {
+    const removed = nur.products.findIndex((p) => p.id === 'gid://shopify/Product/5');
+    const [gone] = nur.products.splice(removed, 1);
+    const stats = await syncCatalogue(deps(s, nur));
+    assert.equal(stats['nur.deletedProducts'], 1);
+    assert.equal(stats['nur.deletedVariants'], 1);
+    assert.equal(stats['nur.unmappedSkus'], 0, 'product 5 held the only SKU-less NUR variant');
+    const [row] = await s.schema.sql<{ deleted: boolean }[]>`select deleted_at is not null as deleted from products where store_id = ${s.nur} and shopify_product_id = 5`;
+    assert.equal(row?.deleted, true, 'kept, but marked: order lines may refer to it');
+
+    nur.products.push(gone!);
+    const back = await syncCatalogue(deps(s, nur));
+    assert.equal(back['nur.deletedProducts'], 0);
+    const [again] = await s.schema.sql<{ deleted: boolean }[]>`select deleted_at is not null as deleted from products where store_id = ${s.nur} and shopify_product_id = 5`;
+    assert.equal(again?.deleted, false, 'a product that comes back is live again');
+  });
+
+  it('marks nothing deleted when the scan is cut short', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const stats = await syncCatalogue({ ...deps(s, nur), signal: controller.signal });
+    assert.equal(stats['nur.deletedProducts'], undefined);
+    const [row] = await s.schema.sql<{ n: number }[]>`select count(*)::int as n from products where store_id = ${s.nur} and deleted_at is not null`;
+    assert.equal(row?.n, 0);
+  });
 });
 
 describe('shopify:orders', { skip: skipWithoutDb }, () => {
@@ -184,6 +210,12 @@ describe('shopify:orders', { skip: skipWithoutDb }, () => {
     const stats = await syncOrders(deps(s, nur));
     assert.equal(stats['nur.skipped'], 1);
     assert.equal(stats['nur.inserted'], 1);
+    const [item] = await s.schema.sql<{ kind: string; detail: Record<string, unknown> }[]>`
+      select kind, detail from reconciliation_items where status = 'open'
+    `;
+    assert.equal(item?.kind, 'shopify_order_skipped');
+    assert.equal(item?.detail['orderNumber'], '#1007');
+    assert.doesNotMatch(JSON.stringify(item?.detail), /0300|Test Customer|House/, 'the queued item holds no customer data');
   });
 });
 

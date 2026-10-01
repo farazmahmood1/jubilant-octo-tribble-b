@@ -142,6 +142,10 @@ export const fakeShopify = (init: { products?: ShopifyProductNode[]; orders?: Sh
         },
       };
     }
+    if (operation === 'Order') {
+      const target = fake.orders.find((o) => o.id === variables['id']);
+      return { order: target ? { ...target, lineItems: connection(target.lineItems.nodes, 0, nestedSize) } : null };
+    }
     if (operation === 'OrderLines') {
       const target = fake.orders.find((o) => o.id === variables['id']);
       return { order: target ? { lineItems: connection(target.lineItems.nodes, offset, nestedSize) } : null };

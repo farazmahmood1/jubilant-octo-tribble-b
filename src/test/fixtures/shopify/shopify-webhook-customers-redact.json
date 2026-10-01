@@ -1,0 +1,7 @@
+{
+  "_fixture": "SYNTHETIC. Shopify REST webhook shape (what webhooks deliver), not recorded; PII masked.",
+  "shop_id": 1,
+  "shop_domain": "nurbyjuggun.myshopify.com",
+  "customer": { "id": 77, "email": "[masked]", "phone": "[masked]" },
+  "orders_to_redact": [1001]
+}

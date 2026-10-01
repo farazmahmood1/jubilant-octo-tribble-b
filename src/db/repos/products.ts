@@ -53,7 +53,7 @@ export const upsertProduct = async (db: Db, input: ProductInput): Promise<Upsert
     insert into products (store_id, shopify_product_id, title, brand, status)
     values (${input.storeId}, ${big(input.shopifyProductId)}, ${input.title}, ${input.brand}, ${input.status.toLowerCase()})
     on conflict (store_id, shopify_product_id) do update
-      set title = excluded.title, brand = excluded.brand, status = excluded.status
+      set title = excluded.title, brand = excluded.brand, status = excluded.status, deleted_at = null
     returning id, (xmax = 0) as inserted, (select doc from prev) is distinct from (to_jsonb(products) - 'updated_at') as changed
   `;
   return toUpsertResult(row);

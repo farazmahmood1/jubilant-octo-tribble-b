@@ -65,6 +65,23 @@ describe('maskPii', () => {
     });
   });
 
+  it('masks the other identifying fields of a REST webhook payload', () => {
+    const payload = {
+      note: 'Call before coming, house behind the mosque',
+      browser_ip: '203.0.113.7',
+      shipping_address: { first_name: 'A', last_name: 'B', zip: '54000', company: 'Shop', latitude: 31.5, longitude: 74.3, city: 'Lahore' },
+      note_attributes: [],
+      total_price: '1250.00',
+    };
+    assert.deepEqual(maskPii(payload), {
+      note: MASK,
+      browser_ip: MASK,
+      shipping_address: { first_name: MASK, last_name: MASK, zip: MASK, company: MASK, latitude: MASK, longitude: MASK, city: 'Lahore' },
+      note_attributes: [],
+      total_price: '1250.00',
+    });
+  });
+
   it('masks numeric PII too', () => {
     assert.deepEqual(maskPii({ customerPhone: 3000000000 }), { customerPhone: MASK });
   });

@@ -40,25 +40,38 @@ const LINE_FIELDS = `
   discountedTotalSet { ${MONEY} }
 `;
 
+const ORDER_FIELDS = `
+  id name createdAt updatedAt cancelledAt cancelReason
+  displayFinancialStatus displayFulfillmentStatus
+  tags discountCodes
+  subtotalPriceSet { ${MONEY} }
+  totalDiscountsSet { ${MONEY} }
+  totalShippingPriceSet { ${MONEY} }
+  totalTaxSet { ${MONEY} }
+  totalPriceSet { ${MONEY} }
+  customer { id firstName lastName phone }
+  shippingAddress { name phone address1 address2 city province zip countryCodeV2 }
+  lineItems(first: ${NESTED_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { ${LINE_FIELDS} } }
+`;
+
 /** Sorted by UPDATED_AT ascending, so a cursor saved after each page is a safe resume point. */
 export const ORDERS_QUERY = `
   query Orders($first: Int!, $after: String, $query: String!) {
     orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
       pageInfo { hasNextPage endCursor }
-      nodes {
-        id name createdAt updatedAt cancelledAt cancelReason
-        displayFinancialStatus displayFulfillmentStatus
-        tags discountCodes
-        subtotalPriceSet { ${MONEY} }
-        totalDiscountsSet { ${MONEY} }
-        totalShippingPriceSet { ${MONEY} }
-        totalTaxSet { ${MONEY} }
-        totalPriceSet { ${MONEY} }
-        customer { id firstName lastName phone }
-        shippingAddress { name phone address1 address2 city province zip countryCodeV2 }
-        lineItems(first: ${NESTED_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { ${LINE_FIELDS} } }
-      }
+      nodes { ${ORDER_FIELDS} }
     }
+  }
+`;
+
+/**
+ * One order by gid, with exactly the fields the bulk sync reads. Webhooks, retries and the
+ * catch-up fetch the order this way rather than mapping Shopify's REST webhook payload, so there
+ * is a single mapping path for every way an order arrives.
+ */
+export const ORDER_QUERY = `
+  query Order($id: ID!) {
+    order(id: $id) { ${ORDER_FIELDS} }
   }
 `;
 
