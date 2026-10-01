@@ -25,6 +25,7 @@ const query = (db: Db, f: ReportFilter, explain = false) =>
              case l.partner_type
                when 'postex_account' then (select pa.label from postex_accounts pa where pa.id = l.partner_id)
                when 'retail_partner' then (select rp.name from retail_partners rp where rp.id = l.partner_id)
+               when 'vendor' then (select v.name from vendors v where v.id = l.partner_id)
              end,
              l.partner_type || ' #' || l.partner_id
            ) as name,

@@ -272,7 +272,10 @@ debits and credits differ, at commit; entries are never edited, a correction is 
   (the step that dates it arrived after its amounts) is re-dated by a same-day reversal, unless
   its month is closed.
 - **COD payout**: bank / COD receivable, per payout line. **Damaged return**: write-off / inventory.
-- Vendor bills and payments, consignment sales and partner payments have posting functions for
+- **Purchasing** (see below): a goods receipt puts its value in Inventory against 2050 Goods
+  received, not yet billed; the vendor's bill clears 2050, posts any price difference to 5010
+  Purchase price variance, freight to general expenses and the input tax to 1400; a payment
+  clears Accounts payable. Consignment sales and partner payments have posting functions for
   when their screens land.
 
 `postex:sync` posts whatever changed (`accounting_pending`, set in the same transaction as the
@@ -314,6 +317,46 @@ API (signed in; amounts are integer paisa in strings): `GET /api/v1/accounting/i
 `GET /api/v1/accounting/accounts/:code/lines`, `GET /api/v1/accounting/periods`,
 `POST /api/v1/accounting/periods/:year/:month/close`, `GET|PUT /api/v1/accounting/opening-balances`.
 The dashboard's Accounting page uses them.
+
+## Purchasing
+
+Migration `0014_purchasing.sql` (Batch F), rules in `src/domain/purchasing.ts`. The five steps
+of proposal 6.1, each one transaction and audited:
+
+1. **Request** stock of one product (`purchase_requests`).
+2. **Quotations** from vendors (`quotations`, `quotation_lines`), compared cheapest first.
+3. **Purchase order** (`purchase_orders`, `po_lines`), typed or taken from a quotation. One brand
+   per order, so stock, cost and money all land on one brand; numbered `PO-00001`.
+4. **Goods receipt** (`goods_receipts`, `gr_lines`), all or part of what is outstanding, never
+   more. Each line moves `supplier → warehouse` and writes the product's cost to
+   `product_costs`: the moving average of what the brand holds and what arrived (the order price
+   when it holds none), dated on the receipt's Karachi day. Delivered parcels' COGS use the cost
+   in force on their order date, so the next sale after a receipt is costed at it, and units
+   held × cost stays equal to the Inventory account. Once a product has a receipt, Shopify's
+   "Cost per item" is no longer imported for it.
+5. **Vendor bill** (`vendor_bills`, `bill_lines`) and **payment** (`vendor_payments`), with the
+   three-way match: per order line, units billed may not exceed units received, and the amount
+   billed may exceed received units at the order's price by at most the tolerance (the larger of
+   `tolerancePercent`, default 2, and `toleranceAbsolutePaisa`, default Rs 100). A bill that
+   fails is refused with the line, the amounts and the tolerance; a payment against a bill that
+   no longer matches is refused too, as is paying more than is outstanding or entering the same
+   vendor invoice number twice.
+
+Documents are never edited (a wrong one is answered by a correction); a request or an order can
+be cancelled, once, and an order only before anything is received. An order's status (ordered,
+partially received, received, billed, paid, cancelled) is derived from its documents.
+
+**Reorder suggestions** use delivered velocity: units that reached customers in the last
+`velocityWindowDays` (default 30), less customer returns, never placed orders. The suggestion
+covers the vendor's lead time (or `defaultLeadTimeDays`, 7) plus `coverDays` (30) at that rate,
+less what is in the warehouse and still on order.
+
+API (signed in; amounts are integer paisa in strings): `GET|POST /api/v1/purchasing/vendors`,
+`PATCH .../vendors/:id`, `GET|POST .../requests`, `POST .../requests/:id/cancel`,
+`POST .../quotations`, `GET .../quotations/compare/:variantId`, `GET|POST .../orders`,
+`GET .../orders/:id`, `POST .../orders/:id/cancel`, `POST .../orders/:id/receipts`,
+`POST .../orders/:id/bills`, `GET .../bills?unpaid=true`, `POST .../bills/:id/payments`,
+`GET .../reorder-suggestions?store=&windowDays=&coverDays=`, `GET|PUT /api/v1/settings/purchasing`.
 
 ## Reports
 

@@ -41,11 +41,13 @@ export const ACCOUNT_CODES = {
   inventory: '1300',
   inputTax: '1400',
   payable: '2000',
+  goodsReceivedNotBilled: '2050',
   salesTaxPayable: '2100',
   equity: '3000',
   openingBalances: '3100',
   revenue: '4000',
   cogs: '5000',
+  priceVariance: '5010',
   deliveryExpense: '6000',
   returnExpense: '6010',
   postexTax: '6020',
@@ -181,8 +183,47 @@ export const vendorBillLines = (b: VendorBillInput): Line[] =>
     cr('payable', add(add(b.inventory, b.expense), b.tax), { storeId: b.storeId ?? null, partner: { type: 'vendor', id: b.vendorId } }),
   ]);
 
-export const vendorPaymentLines = (p: { vendorId: string; amount: Paisa }): Line[] =>
-  normalise([dr('payable', p.amount, { partner: { type: 'vendor', id: p.vendorId } }), cr('bank', p.amount)]);
+export const vendorPaymentLines = (p: { vendorId: string; amount: Paisa; storeId?: string | null }): Line[] =>
+  normalise([
+    dr('payable', p.amount, { storeId: p.storeId ?? null, partner: { type: 'vendor', id: p.vendorId } }),
+    cr('bank', p.amount, { storeId: p.storeId ?? null }),
+  ]);
+
+/** Goods received ahead of the bill: in Inventory at the order's price, owed but not yet invoiced. */
+export const goodsReceiptLines = (r: { vendorId: string; storeId: string; value: Paisa }): Line[] =>
+  normalise([
+    dr('inventory', r.value, { storeId: r.storeId }),
+    cr('goodsReceivedNotBilled', r.value, { storeId: r.storeId, partner: { type: 'vendor', id: r.vendorId } }),
+  ]);
+
+export interface PurchaseBillInput {
+  vendorId: string;
+  storeId: string;
+  /** Billed units at the order's price: what the receipts put in Inventory, now invoiced. */
+  received: Paisa;
+  /** Billed price minus the order's price, on those units; negative when the bill is cheaper. */
+  variance: Paisa;
+  /** Lines with no product (freight, say). */
+  charges: Paisa;
+  tax: Paisa;
+}
+
+/**
+ * A bill against a purchase order clears what its receipts left owed but not billed. A price
+ * different from the order's goes to purchase price variance, so Inventory stays at what the
+ * receipts valued it at (the cost the products carry).
+ */
+export const purchaseBillLines = (b: PurchaseBillInput): Line[] => {
+  const extra = { storeId: b.storeId };
+  const vendor = { ...extra, partner: { type: 'vendor' as const, id: b.vendorId } };
+  return normalise([
+    dr('goodsReceivedNotBilled', b.received, vendor),
+    dr('priceVariance', b.variance, extra),
+    dr('general', b.charges, extra),
+    dr('inputTax', b.tax, extra),
+    cr('payable', add(add(add(b.received, b.variance), b.charges), b.tax), vendor),
+  ]);
+};
 
 export interface ConsignmentSaleInput {
   partnerId: string;

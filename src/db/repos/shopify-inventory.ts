@@ -1,6 +1,6 @@
 import type { MappedVariantInventory } from '../../integrations/shopify/mapper.js';
 import type { Paisa } from '../../lib/money.js';
-import { resolveOpenReviewItem } from './review.js';
+import { costRecorded } from './costs.js';
 import { type Db, atomically, big } from './upsert.js';
 
 /**
@@ -11,7 +11,8 @@ import { type Db, atomically, big } from './upsert.js';
  * adds nothing. The first cost Shopify gives a variant that has no cost at all is taken back to
  * the start of the synced history (the `costs` setting, default 1 January 2026), so the parcels
  * already delivered can be costed; a person can always enter a dated cost that overrides it.
- * Later changes take effect on the day they are seen.
+ * Later changes take effect on the day they are seen. A variant bought through a goods receipt
+ * takes its cost from its receipts from then on, and Shopify's is ignored.
  */
 
 export const SHOPIFY_COST_NOTE = 'shopify:cost_per_item';
@@ -22,7 +23,7 @@ const firstCostFrom = async (db: Db): Promise<string> => {
   return row?.value.shopifyFirstEffectiveFrom ?? DEFAULT_FIRST_COST_FROM;
 };
 
-export type CostImport = 'unchanged' | 'first' | 'changed' | 'none';
+export type CostImport = 'unchanged' | 'first' | 'changed' | 'none' | 'purchased';
 
 /**
  * Records Shopify's cost for one variant if it is new or different. When a cost is added, the
@@ -32,6 +33,10 @@ export type CostImport = 'unchanged' | 'first' | 'changed' | 'none';
 export const importShopifyCost = async (db: Db, variantId: string, cost: Paisa | null, today: string): Promise<CostImport> => {
   if (cost === null) return 'none';
   return atomically(db, async (tx) => {
+    // Once a variant has been bought through a goods receipt, its cost comes from what was
+    // paid; a "Cost per item" left stale in Shopify must not overwrite it.
+    const [purchased] = await tx`select 1 from product_costs where variant_id = ${variantId} and source = 'goods_receipt' limit 1`;
+    if (purchased) return 'purchased';
     const [last] = await tx<{ unit_cost_paisa: string }[]>`
       select unit_cost_paisa::text from product_costs
       where variant_id = ${variantId} and source = 'import' and note = ${SHOPIFY_COST_NOTE}
@@ -44,15 +49,7 @@ export const importShopifyCost = async (db: Db, variantId: string, cost: Paisa |
       insert into product_costs (variant_id, unit_cost_paisa, effective_from, source, note)
       values (${variantId}, ${big(cost)}, ${effectiveFrom}, 'import', ${SHOPIFY_COST_NOTE})
     `;
-    await tx`
-      update shipments set accounting_pending = true
-      where not accounting_pending and id in (select shipment_id from stock_moves where variant_id = ${variantId} and shipment_id is not null)
-    `;
-    const answered = await tx<{ dedupe_key: string }[]>`
-      select dedupe_key from reconciliation_items
-      where kind = 'cost_missing' and status = 'open' and detail->>'variantId' = ${variantId} and detail->>'needCostOn' >= ${effectiveFrom}
-    `;
-    for (const item of answered) await resolveOpenReviewItem(tx, item.dedupe_key, `Cost imported from Shopify, effective ${effectiveFrom}`);
+    await costRecorded(tx, variantId, effectiveFrom, 'Cost imported from Shopify');
     return any ? 'changed' : 'first';
   });
 };

@@ -8,6 +8,7 @@ import { confirmationsRouter } from './confirmations.js';
 import { healthRouter } from './health.js';
 import { influencersRouter } from './influencers.js';
 import { integrationsRouter } from './integrations.js';
+import { purchasingRouter } from './purchasing.js';
 import { reconciliationRouter } from './reconciliation.js';
 import { reportsRouter } from './reports.js';
 import { settingsRouter } from './settings.js';
@@ -30,5 +31,6 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(confirmationsRouter(getSql));
   apiRouter.use(influencersRouter(getSql));
   apiRouter.use(reportsRouter(getSql));
+  apiRouter.use(purchasingRouter(getSql));
   return apiRouter;
 };
