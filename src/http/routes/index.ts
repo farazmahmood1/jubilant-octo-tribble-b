@@ -10,6 +10,7 @@ import { healthRouter } from './health.js';
 import { influencersRouter } from './influencers.js';
 import { integrationsRouter } from './integrations.js';
 import { orderImportRouter } from './order-import.js';
+import { parcelsRouter } from './parcels.js';
 import { prRouter } from './pr.js';
 import { purchasingRouter } from './purchasing.js';
 import { reconciliationRouter } from './reconciliation.js';
@@ -38,5 +39,6 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(consignmentRouter(getSql));
   apiRouter.use(prRouter(getSql));
   apiRouter.use(orderImportRouter(getSql));
+  apiRouter.use(parcelsRouter(getSql));
   return apiRouter;
 };

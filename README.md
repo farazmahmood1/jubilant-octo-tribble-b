@@ -206,6 +206,28 @@ fulfillment status, not a tag. Change the list with `GET|PUT /api/v1/settings/co
 then run `npm run orders:states` to re-derive every order. Run it once after deploying migration
 0012 too: it creates the `confirmations` row of every existing order.
 
+## Parcels
+
+Read-only views of PostEx parcels for the dashboard; nothing here writes to PostEx.
+`GET /api/v1/parcels?q&stage&store&flag&city&from&to&sort=key:dir&page&size` lists parcels.
+- `q` searches the tracking number, the order reference or number, and the phone.
+- `stage` is derived from the latest status code on every read, never stored.
+- `flag` is one of `unmatched`, `zero_cod`, `pr`, `not_checked_in` or `checked_in`.
+- `from` and `to` are Karachi booking days.
+- `sort` is `bookedAt`, `statusUpdatedAt`, `cod` or `days`.
+- `size` is at most 200.
+
+Days in transit count Karachi days from booking to the final event of a delivered, returned or
+cancelled parcel, otherwise to now. `GET /api/v1/parcels/cities` lists the cities to filter by.
+`GET /api/v1/parcels/:id` returns one parcel with:
+- its full status timeline;
+- its charges and payout (CPR);
+- its warehouse check-in;
+- its linked order and that order's lines;
+- its open reconciliation items.
+
+The accountant role gets no customer phone.
+
 ## Confirmation Desk
 
 Agents work orders from a queue; what they record is the fact, and everything else follows from
