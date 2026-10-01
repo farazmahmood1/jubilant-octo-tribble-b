@@ -115,28 +115,31 @@ describe('migrate', { skip: skipWithoutDb }, () => {
   });
 
   it('summarises for /ready: pending, then ok, then mismatch', async () => {
+    const names = readMigrations(dir).map((f) => `${f.version}_${f.name}`);
     assert.deepEqual(await summarizeMigrations(schema.sql, dir), {
       status: 'pending',
       applied: 0,
-      pending: ['0001_foundations'],
+      pending: names,
       mismatched: [],
     });
     await migrate(schema.sql, dir);
-    assert.deepEqual(await summarizeMigrations(schema.sql, dir), { status: 'ok', applied: 1, pending: [], mismatched: [] });
+    assert.deepEqual(await summarizeMigrations(schema.sql, dir), { status: 'ok', applied: names.length, pending: [], mismatched: [] });
     appendFileSync(join(dir, '0001_foundations.sql'), '\n-- edited\n');
     assert.deepEqual(await summarizeMigrations(schema.sql, dir), {
       status: 'mismatch',
-      applied: 0,
+      applied: names.length - 1,
       pending: [],
       mismatched: ['0001_foundations'],
     });
   });
 
   it('reports pending, applied and changed in status without changing anything', async () => {
-    assert.deepEqual((await migrationStatus(schema.sql, dir)).map((s) => s.state), ['pending']);
+    const others = readMigrations(dir).length - 1;
+    const states = async () => (await migrationStatus(schema.sql, dir)).map((s) => s.state);
+    assert.deepEqual(await states(), ['pending', ...Array(others).fill('pending')]);
     await migrate(schema.sql, dir);
-    assert.deepEqual((await migrationStatus(schema.sql, dir)).map((s) => s.state), ['applied']);
+    assert.deepEqual(await states(), ['applied', ...Array(others).fill('applied')]);
     appendFileSync(join(dir, '0001_foundations.sql'), '\n-- edited\n');
-    assert.deepEqual((await migrationStatus(schema.sql, dir)).map((s) => s.state), ['changed']);
+    assert.deepEqual(await states(), ['changed', ...Array(others).fill('applied')]);
   });
 });

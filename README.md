@@ -54,6 +54,7 @@ src/
   domain/                   pure business rules: shipment-to-order matching, order state
   db.ts                     Neon connection (TLS required except on localhost), health check
   db/                       migration runner, migrations/NNNN_name.sql, seed from config
+  db/repos/                 typed upserts and reads: products, variants (+ costs), customers, orders
   http/routes/              health, integrations status
   http/middleware/errors.ts 404 and error handling
   integrations/postex/      read-only PostEx client + verified response types

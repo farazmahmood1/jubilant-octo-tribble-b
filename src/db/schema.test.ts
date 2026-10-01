@@ -21,7 +21,7 @@ describe('sslOptions', () => {
   });
 });
 
-describe('Batch A schema', { skip: skipWithoutDb }, () => {
+describe('schema', { skip: skipWithoutDb }, () => {
   let schema: TestSchema;
 
   before(async () => {
@@ -41,13 +41,17 @@ describe('Batch A schema', { skip: skipWithoutDb }, () => {
     return rows.map((r) => String(r['column_name']));
   };
 
-  it('creates exactly the Batch A tables', async () => {
+  it('creates exactly the Batch A, B and C tables', async () => {
     const rows = await schema.sql`
       select table_name from information_schema.tables where table_schema = ${schema.name} order by table_name
     `;
     assert.deepEqual(
       rows.map((r) => r['table_name']),
-      ['app_settings', 'audit_log', 'integration_cursors', 'postex_accounts', 'schema_migrations', 'stores', 'sync_runs', 'users'],
+      [
+        'addresses', 'app_settings', 'audit_log', 'customers', 'integration_cursors', 'order_lines', 'order_state_log',
+        'orders', 'postex_accounts', 'product_costs', 'products', 'schema_migrations', 'stores', 'sync_runs', 'users',
+        'variants', 'webhook_events',
+      ],
     );
   });
 
