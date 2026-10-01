@@ -9,6 +9,9 @@ import {
   BALANCE_SHEET_KEYS,
   accountLedger,
   closePeriod,
+  entriesBeforeOpening,
+  inventoryCheck,
+  karachiDay,
   listPeriods,
   openingBalances,
   postOpeningBalances,
@@ -31,6 +34,7 @@ const store = z.enum(['nur', 'organics']).optional();
 const tbQuery = z.object({ to: z.string().regex(DAY).optional(), store });
 const ledgerParams = z.object({ code: z.string().regex(/^\d{4}$/) });
 const ledgerQuery = z.object({ to: z.string().regex(DAY).optional(), store, limit: z.coerce.number().int().min(1).max(1000).default(200) });
+const checkQuery = z.object({ asAt: z.string().regex(DAY).optional() });
 const periodParams = z.object({ year: z.coerce.number().int().min(2000).max(2100), month: z.coerce.number().int().min(1).max(12) });
 const opening = z.object({
   date: z.string().regex(DAY),
@@ -96,11 +100,27 @@ export const accountingRouter = (getSql: SqlProvider): Router => {
     res.json({ year, month, status: 'closed' });
   });
 
+  /** Inventory account vs units × cost, as at a day (default today): the opening stock check. */
+  router.get('/accounting/inventory-check', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { asAt } = parse(checkQuery, req.query);
+    let check;
+    try {
+      check = await inventoryCheck(sql, asAt ?? karachiDay(new Date()));
+    } catch (error) {
+      if (error instanceof RangeError) throw new HttpError(400, error.message);
+      throw error;
+    }
+    res.json({ ...check, stockValue: check.stockValue.toString(), ledgerValue: check.ledgerValue.toString(), difference: check.difference.toString(), agrees: check.difference === 0n });
+  });
+
   router.get('/accounting/opening-balances', async (_req, res) => {
     const sql = requireSql(getSql);
     const current = await openingBalances(sql);
     const stores = await sql<{ id: string; key: string }[]>`select id, key from stores`;
     res.json({
+      // Non-zero means history the client's balances already include would be counted twice.
+      entriesBeforeOpening: await entriesBeforeOpening(sql),
       accounts: BALANCE_SHEET_KEYS.map((key) => ({ key, code: ACCOUNT_CODES[key] })),
       opening: current
         ? {

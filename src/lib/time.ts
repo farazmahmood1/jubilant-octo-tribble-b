@@ -95,6 +95,15 @@ export const parsePostexLocal = (text: string): Date => {
   return fromKarachiWallClock(parts);
 };
 
+/**
+ * The last second of a Karachi calendar day (`"2026-09-30"`): what "as at" a date means for
+ * counts and balances. Throws RangeError for a day that does not exist.
+ */
+export const endOfKarachiDay = (day: string): Date => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RangeError(`Not a calendar day: "${day}"`);
+  return parsePostexLocal(`${day} 23:59:59.999`);
+};
+
 /** Midnight in Karachi at the start of the Karachi day containing `date`. */
 export const startOfKarachiDay = (date: Date): Date => {
   const { year, month, day } = karachiParts(date);

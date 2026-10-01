@@ -9,6 +9,7 @@ import { config } from '../../config.js';
 import { payoutLines, postEntry } from '../../domain/accounting.js';
 import { paisa } from '../../lib/money.js';
 import { skipWithoutDb } from '../../test/db.js';
+import { variantsIn } from '../../test/inventory.js';
 import { type Stores, migratedWithStores } from '../../test/stores.js';
 
 /** The accounting and confirmation-tag routes through the real app, against a scratch schema. */
@@ -118,9 +119,48 @@ describe('API: trial balance, ledger, month close, opening balances, confirmatio
     assert.match((late.body['error'] as { message: string }).message, /Period 2026-08 is closed/);
   });
 
+  it('warns when entries are dated on or before the opening balances: they would be counted twice', async () => {
+    const { body } = await call('GET', '/accounting/opening-balances');
+    assert.deepEqual(body['entriesBeforeOpening'], { count: 1, earliest: '2026-08-20' });
+  });
+
+  it('checks the opening Inventory balance against the opening stock count, units × cost, as at the cut-over day', async () => {
+    const [counted, uncosted] = await variantsIn(s.schema.sql, s.nur, 2);
+    await s.schema.sql`insert into product_costs (variant_id, unit_cost_paisa, effective_from, source) values (${counted!}, '45000', '2026-01-01', 'manual')`;
+    const locations = (await call('GET', '/stock/locations')).body['locations'] as Array<{ id: string; key: string }>;
+    const warehouse = locations.find((l) => l.key === 'warehouse')!.id;
+
+    // A recount dated back is refused; only opening stock may carry a date.
+    assert.equal((await call('POST', '/stock/adjustments', { locationId: warehouse, reason: 'count', asAt: '2026-09-30', lines: [{ variantId: counted, delta: 1 }] })).status, 409);
+    assert.equal((await call('POST', '/stock/adjustments', { locationId: warehouse, reason: 'opening_stock', asAt: '2026-02-30', lines: [{ variantId: counted, delta: 1 }] })).status, 400);
+    const opened = await call('POST', '/stock/adjustments', {
+      locationId: warehouse,
+      reason: 'opening_stock',
+      asAt: '2026-09-30',
+      lines: [{ variantId: counted, delta: 10 }, { variantId: uncosted, delta: 3 }],
+    });
+    assert.equal(opened.status, 201);
+
+    // The books say Rs 4,000 of inventory; the count says 10 × Rs 450 = Rs 4,500, plus 3 units with no cost.
+    await call('PUT', '/accounting/opening-balances', { date: '2026-09-30', lines: [{ code: '1000', balancePaisa: '650000' }, { code: '1300', balancePaisa: '400000' }] });
+    const check = (await call('GET', '/accounting/inventory-check?asAt=2026-09-30')).body;
+    assert.deepEqual([check['stockValue'], check['ledgerValue'], check['difference'], check['agrees'], check['units']], ['450000', '400000', '-50000', false, 13]);
+    assert.deepEqual((check['missingCost'] as Array<{ variantId: string; units: number }>).map((m) => [m.variantId, m.units]), [[uncosted, 3]]);
+
+    // Corrected to the count, and with the missing cost entered, they agree.
+    await s.schema.sql`insert into product_costs (variant_id, unit_cost_paisa, effective_from, source) values (${uncosted!}, '20000', '2026-09-01', 'manual')`;
+    await call('PUT', '/accounting/opening-balances', { date: '2026-09-30', lines: [{ code: '1000', balancePaisa: '650000' }, { code: '1300', balancePaisa: '510000' }] });
+    const agreed = (await call('GET', '/accounting/inventory-check?asAt=2026-09-30')).body;
+    assert.deepEqual([agreed['stockValue'], agreed['difference'], agreed['agrees']], ['510000', '0', true]);
+
+    // The day before the cut-over there was nothing counted and nothing booked.
+    const before = (await call('GET', '/accounting/inventory-check?asAt=2026-09-29')).body;
+    assert.deepEqual([before['units'], before['stockValue'], before['ledgerValue']], [0, '0', '0']);
+  });
+
   it("confirmation tags: the team's tags by default, replaced and audited", async () => {
     const current = await call('GET', '/settings/confirmation-tags');
-    assert.deepEqual((current.body['confirmationTags'] as Record<string, string[]>)['confirmed'], ['Order Confirmed']);
+    assert.deepEqual((current.body['confirmationTags'] as Record<string, string[]>)['confirmed'], ['Order Confirmed', 'COD-Confirmed']);
     const tags = { confirmed: ['Order Confirmed', 'Confirmed by WhatsApp'], cancelled: ['Order Canceled'], pending: [], noAnswer: ['didnt answer the call'], unreachable: ['number off'] };
     assert.equal((await call('PUT', '/settings/confirmation-tags', tags)).status, 200);
     assert.deepEqual((await call('GET', '/settings/confirmation-tags')).body['confirmationTags'], tags);

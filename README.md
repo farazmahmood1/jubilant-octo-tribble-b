@@ -172,8 +172,8 @@ dashboard's Reconciliation page; the next `postex:sync` re-tries every unmatched
 `orders.state` is written only by `recomputeOrderState()`, after a Shopify order is stored and
 after a parcel's status or order link changes; every change is logged in `order_state_log` with
 its reason. Until the Confirmation Desk exists, confirmation comes from the Shopify tags the
-team uses, compared by their words (emoji and case ignored): `Order Confirmed`; `Order
-Canceled`; `Confirmation Pending`; `didnt answer the call`, `call not attended`, `didnt confirm`
+teams use, compared by their words (emoji and case ignored): `Order Confirmed`, `COD-Confirmed`;
+`Order Canceled`; `Confirmation Pending`, `COD-Needs-Review`; `didnt answer the call`, `call not attended`, `didnt confirm`
 (no answer); `number off`, `No Phone`, `NO WhatsApp` (unreachable). "On hold" is Shopify's own
 fulfillment status, not a tag. Change the list with `GET|PUT /api/v1/settings/confirmation-tags`,
 then run `npm run orders:states` to re-derive every order.
@@ -210,7 +210,28 @@ instead, saying so in the memo.
 balance is the owner's opening equity (3100), so a partial list still posts and the gap shows.
 Re-entering them reverses the earlier entry while that month is open.
 
-API (signed in; amounts are integer paisa in strings): `GET /api/v1/accounting/trial-balance?to=&store=`,
+**Checking the opening figures** (Accounting page, or the API below):
+
+1. **Pick the cut-over date: the day before the first parcel in the system** (the PostEx history
+   starts in May 2026). Everything after it is posted from the syncs; the client's books cover
+   everything before it. The opening balances card warns if any entry is dated on or before it,
+   because that history would be counted twice.
+2. **Get the client's balance sheet as at that day** from their accountant: bank balance (match
+   the bank statement), money PostEx held for them (COD collected, not yet paid out: the PostEx
+   portal or the last statement), supplier balances owed, sales tax owed, consignment owed by
+   partners, and the stock value. Enter them on the card. A gap shows up in 3100 Opening balances:
+   ask the accountant what it is before the first month closes.
+3. **Count the stock as at the same day** and enter it on the Inventory page as *Opening stock*,
+   "counted as at" that date (only an opening count can be dated back). Enter each product's cost
+   effective on or before that date.
+4. **Run the Inventory check for that date.** It compares the Inventory account (1300) with
+   units × cost and must say *Agrees*. If not: products with no cost are listed (enter the
+   cost), products below zero were sold before the count was entered, and any remaining
+   difference means the client's stock value and their count disagree.
+5. **Compare the trial balance as at that date** with the client's balance sheet, line by line.
+
+API (signed in; amounts are integer paisa in strings): `GET /api/v1/accounting/inventory-check?asAt=`,
+`GET /api/v1/accounting/trial-balance?to=&store=`,
 `GET /api/v1/accounting/accounts/:code/lines`, `GET /api/v1/accounting/periods`,
 `POST /api/v1/accounting/periods/:year/:month/close`, `GET|PUT /api/v1/accounting/opening-balances`.
 The dashboard's Accounting page uses them.

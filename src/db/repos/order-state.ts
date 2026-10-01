@@ -28,11 +28,14 @@ export interface ConfirmationTags {
   unreachable: string[];
 }
 
-/** The tags NUR by Juggun's team uses today (Shopify admin, October 2026). */
+/**
+ * The tags both teams use today (Shopify admin, October 2026). Juggun's Organics also has the
+ * `COD-Confirmed` / `COD-Needs-Review` pair, which NUR by Juggun does not.
+ */
 export const DEFAULT_CONFIRMATION_TAGS: ConfirmationTags = {
-  confirmed: ['Order Confirmed'],
+  confirmed: ['Order Confirmed', 'COD-Confirmed'],
   cancelled: ['Order Canceled', 'Order Cancelled'],
-  pending: ['Confirmation Pending'],
+  pending: ['Confirmation Pending', 'COD-Needs-Review'],
   noAnswer: ['didnt answer the call', 'call not attended', 'didnt confirm'],
   unreachable: ['number off', 'No Phone', 'NO WhatsApp'],
 };

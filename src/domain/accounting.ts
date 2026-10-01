@@ -4,7 +4,7 @@ import { type Db, atomically, big, readPaisa } from '../db/repos/upsert.js';
 import { costAt } from '../db/repos/variants.js';
 import { POSTEX_STATUS_CODES, type ShipmentEvent } from '../integrations/postex/mapper.js';
 import { type Paisa, ZERO, add, paisa, sub, sum } from '../lib/money.js';
-import { formatKarachi } from '../lib/time.js';
+import { endOfKarachiDay, formatKarachi } from '../lib/time.js';
 import { canonicalOrder, explain } from './order-state.js';
 
 /**
@@ -790,4 +790,91 @@ export const accountLedger = async (db: Db, code: string, options: { to?: string
     entryId: r.entry_id, date: r.date, memo: r.memo, sourceType: r.source_type, sourceId: r.source_id, storeId: r.store_id,
     debit: readPaisa(r.debit), credit: readPaisa(r.credit), reversed: r.reversed,
   }));
+};
+
+// ---- Checks for the opening figures ----
+
+/** Where the business still owns the goods: everything but sold, PR'd, written off, or not yet bought. */
+const OWNED_KINDS = ['warehouse', 'partner', 'in_transit', 'returning'];
+
+export interface InventoryCheck {
+  asAt: string;
+  /** Units the stock ledger says are owned at the end of that day, each at its cost on that day. */
+  stockValue: Paisa;
+  /** The Inventory account (1300) balance on that day. */
+  ledgerValue: Paisa;
+  /** Ledger minus stock: zero when the books and the count agree. */
+  difference: Paisa;
+  variants: number;
+  units: number;
+  /** Units held with no cost on that date: their value is missing from `stockValue`. */
+  missingCost: Array<{ variantId: string; sku: string | null; title: string; units: number }>;
+  /** Variants whose owned units are below zero: stock that left before it was counted in. */
+  negative: Array<{ variantId: string; sku: string | null; title: string; units: number }>;
+}
+
+/**
+ * Do the books and the stock count agree? The Inventory account against units × cost, both as at
+ * the end of one Karachi day. On the cut-over date this checks the opening Inventory balance
+ * against the opening stock count; later on, a difference means stock moved without a posting
+ * (a count correction) or costs changed since the goods were costed.
+ */
+export const inventoryCheck = async (db: Db, asAt: string): Promise<InventoryCheck> => {
+  const end = endOfKarachiDay(asAt);
+  const rows = await db<{ variant_id: string; sku: string | null; title: string; units: number }[]>`
+    select v.id as variant_id, v.sku, p.title || ' · ' || v.title as title, sum(m.units)::int as units
+    from (
+      select variant_id, qty as units, to_location_id as location_id, occurred_at from stock_moves
+      union all
+      select variant_id, -qty, from_location_id, occurred_at from stock_moves
+    ) m
+    join locations l on l.id = m.location_id
+    join variants v on v.id = m.variant_id
+    join products p on p.id = v.product_id
+    where l.kind = any(${OWNED_KINDS}::text[]) and m.occurred_at <= ${end}
+    group by v.id, v.sku, p.title, v.title
+    having sum(m.units) <> 0
+    order by p.title, v.title
+  `;
+  let stockValue = ZERO;
+  const missingCost: InventoryCheck['missingCost'] = [];
+  for (const row of rows) {
+    const cost = await costAt(db, row.variant_id, end);
+    if (cost === null) {
+      missingCost.push({ variantId: row.variant_id, sku: row.sku, title: row.title, units: row.units });
+      continue;
+    }
+    stockValue = add(stockValue, paisa(cost * BigInt(row.units)));
+  }
+  const [ledger] = await db<{ balance: string }[]>`
+    select coalesce(sum(l.debit_paisa - l.credit_paisa), 0)::text as balance
+    from journal_lines l join journal_entries e on e.id = l.entry_id join accounts a on a.id = l.account_id
+    where a.code = ${ACCOUNT_CODES.inventory} and e.entry_date <= ${asAt}::date
+  `;
+  const ledgerValue = readPaisa(ledger!.balance);
+  return {
+    asAt,
+    stockValue,
+    ledgerValue,
+    difference: sub(ledgerValue, stockValue),
+    variants: rows.length,
+    units: rows.reduce((n, r) => n + r.units, 0),
+    missingCost,
+    negative: rows.filter((r) => r.units < 0).map((r) => ({ variantId: r.variant_id, sku: r.sku, title: r.title, units: r.units })),
+  };
+};
+
+/**
+ * Entries other than the opening balances dated on or before the opening date. Opening balances
+ * must be the first thing in the books: anything dated earlier is history the client's own
+ * balances already include, so it would be counted twice.
+ */
+export const entriesBeforeOpening = async (db: Db): Promise<{ count: number; earliest: string | null }> => {
+  const [row] = await db<{ count: number; earliest: string | null }[]>`
+    select count(*)::int as count, min(e.entry_date)::text as earliest
+    from journal_entries e
+    where e.source_type <> 'opening_balance' and e.reverses_id is null
+      and e.entry_date <= (select entry_date from journal_entries where source_type = 'opening_balance' and reversed_by is null)
+  `;
+  return { count: row?.count ?? 0, earliest: row?.earliest ?? null };
 };

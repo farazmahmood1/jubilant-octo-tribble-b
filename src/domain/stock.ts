@@ -105,14 +105,26 @@ export interface AdjustmentLine {
  */
 export const recordAdjustment = async (
   sql: Sql,
-  input: { locationId: string; reason: 'opening_stock' | 'count' | 'correction' | 'damage' | 'loss'; note?: string; actorId: string; lines: AdjustmentLine[] },
+  input: {
+    locationId: string;
+    reason: 'opening_stock' | 'count' | 'correction' | 'damage' | 'loss';
+    note?: string;
+    actorId: string;
+    lines: AdjustmentLine[];
+    /**
+     * When the count was true, for an opening stock count taken as at the cut-over date. Only
+     * opening stock may be dated back: any other count is true when it is recorded.
+     */
+    at?: Date;
+  },
 ): Promise<string> =>
   atomically(sql, async (tx) => {
     const lines = input.lines.filter((l) => l.delta !== 0);
     if (lines.length === 0) throw new StockError('An adjustment needs at least one non-zero line');
+    if (input.at && input.reason !== 'opening_stock') throw new StockError('Only an opening stock count can be dated back');
     const [row] = await tx<{ id: string; at: Date }[]>`
-      insert into stock_adjustments (location_id, reason, note, actor_id)
-      values (${input.locationId}, ${input.reason}, ${input.note ?? null}, ${input.actorId})
+      insert into stock_adjustments (location_id, reason, note, actor_id, at)
+      values (${input.locationId}, ${input.reason}, ${input.note ?? null}, ${input.actorId}, ${input.at ?? new Date()})
       returning id, at
     `;
     if (!row) throw new StockError('Adjustment insert returned no row');

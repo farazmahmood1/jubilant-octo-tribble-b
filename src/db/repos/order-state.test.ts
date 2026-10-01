@@ -11,7 +11,7 @@ import { SPIKE, fakePostex, syntheticParcels } from '../../test/postex-fake.js';
 import { type Stores, migratedWithStores } from '../../test/stores.js';
 import { DEFAULT_CONFIRMATION_TAGS, confirmationFromTags, recomputeOrderState, tagWords } from './order-state.js';
 
-describe('confirmation from the Shopify tags NUR by Juggun uses', () => {
+describe('confirmation from the Shopify tags both teams use', () => {
   const read = (...tags: string[]) => confirmationFromTags(tags, DEFAULT_CONFIRMATION_TAGS);
 
   it('compares tags by their words: emoji, case and spacing do not matter', () => {
@@ -30,6 +30,11 @@ describe('confirmation from the Shopify tags NUR by Juggun uses', () => {
     assert.equal(read('number off'), 'unreachable');
     assert.equal(read('⚠ No Phone'), 'unreachable');
     assert.equal(read('⚠ NO WhatsApp'), 'unreachable');
+    // Juggun's Organics' own pair.
+    assert.equal(read('COD-Confirmed', 'PostEx'), 'confirmed');
+    assert.equal(read('COD-Needs-Review'), 'pending');
+    // Organics #1102: a number that is off outranks the pending tag left beside it.
+    assert.equal(read('number off', '⚠ Confirmation Pending'), 'unreachable');
     // A later decision wins over an earlier call outcome left on the order.
     assert.equal(read('didnt answer the call', '✅ Order Confirmed'), 'confirmed');
     assert.equal(read('✅ Order Confirmed', '❌ Order Canceled'), 'cancelled');

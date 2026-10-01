@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   KARACHI,
   daysBetweenKarachi,
+  endOfKarachiDay,
   formatKarachi,
   karachiMonthKey,
   parsePostexLocal,
@@ -35,6 +36,17 @@ describe('parsePostexLocal', () => {
   for (const text of ['2026-02-30 10:00:00', '2026-13-01 10:00:00', '2026-05-21 24:00:00', '2026-05-21 14:60:00', '2026-05-21T14:30:00Z', '2026-05-21 14:30:00+05:00', '21/05/2026 14:30', '', '2026-05-21']) {
     it(`rejects "${text}"`, () => assert.throws(() => parsePostexLocal(text), RangeError));
   }
+});
+
+describe('endOfKarachiDay', () => {
+  it('is the last instant of the Karachi day, which is 18:59:59.999 UTC', () => {
+    assert.equal(endOfKarachiDay('2026-09-30').toISOString(), '2026-09-30T18:59:59.999Z');
+  });
+
+  it('refuses a day that does not exist or is not a day', () => {
+    assert.throws(() => endOfKarachiDay('2026-02-30'), RangeError);
+    assert.throws(() => endOfKarachiDay('30/09/2026'), RangeError);
+  });
 });
 
 describe('startOfKarachiDay', () => {

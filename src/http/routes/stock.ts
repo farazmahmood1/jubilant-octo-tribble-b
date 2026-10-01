@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { actorId } from '../../auth/actor.js';
 import { postShipmentAccounting } from '../../domain/accounting.js';
 import { StockError, checkInReturn, recordAdjustment, returnsAwaitingCheckIn } from '../../domain/stock.js';
+import { endOfKarachiDay } from '../../lib/time.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
 import { ID, parse } from '../validate.js';
@@ -25,12 +26,22 @@ const adjustment = z.object({
   locationId: z.string().regex(ID),
   reason: z.enum(['opening_stock', 'count', 'correction', 'damage', 'loss']),
   note: z.string().trim().max(2000).optional(),
+  /** Opening stock only: the Karachi day the count was true (the cut-over date). */
+  asAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   lines: z
     .array(z.object({ variantId: z.string().regex(ID), delta: z.number().int().refine((n) => n !== 0, 'must not be zero') }))
     .min(1)
     .max(500),
 });
 const variantsQuery = z.object({ search: z.string().trim().min(1).max(80), store: z.enum(['nur', 'organics']).optional() });
+
+const asAtDay = (day: string): Date => {
+  try {
+    return endOfKarachiDay(day);
+  } catch {
+    throw new HttpError(400, `asAt: ${day} is not a real date`);
+  }
+};
 
 /** StockError is a rule the request broke, not a server fault. */
 const asHttp = (error: unknown): never => {
@@ -116,6 +127,8 @@ export const stockRouter = (getSql: SqlProvider): Router => {
       actorId: await actorId(sql, sessionUser(req)),
       lines: body.lines,
       ...(body.note ? { note: body.note } : {}),
+      // End of that day in Karachi, so the count is in any check "as at" the same date.
+      ...(body.asAt ? { at: asAtDay(body.asAt) } : {}),
     }).catch(asHttp);
     res.status(201).json({ id });
   });
