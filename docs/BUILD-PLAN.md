@@ -19,6 +19,11 @@ Working:
 
 Not started: database schema, any sync, any business module.
 
+Hosting as of 1 October 2026: the frontend is deployed on **Vercel**
+(`https://scaling-guide-flame.vercel.app`), not a Render static site. The backend runs on
+localhost until the client shares the Render keys. Until then the Vercel site cannot reach an
+API; development uses the local frontend (`npm run dev`) against the local backend.
+
 Everything below assumes PostEx stays **read-only**. No booking, no cancelling, no shipper advice. That is a scope exclusion in the proposal and a safety rule in the code.
 
 ---
@@ -404,7 +409,7 @@ and the platform deployed. So three later-numbered steps are pulled forward, in 
 
 | Week | Steps | Notes |
 | --- | --- | --- |
-| 1 | 1, 2, 3, **17a**, 4, 5 | 17a = web service, worker and static site on Render with secrets, done before Step 4 so webhooks have a stable public URL. |
+| 1 | 1, 2, 3, **17a**, 4, 5 | 17a = web service and worker on Render with secrets, done before Step 4 so webhooks have a stable public URL. The frontend is on Vercel instead of a Render static site: set `VITE_API_URL` there to the Render URL and add the Vercel origin to `CORS_ORIGIN`. Until the Render keys arrive, Step 4 webhooks need a tunnel to localhost. |
 | 2 | 6, 7, 8, 9, **15a**, 11, payouts | 15a = real accounts and the five roles with PII suppression; TOTP can follow. "Payouts" is note S3 below. |
 | **End of week 2** | **Release 1** | Parallel run against the manual sheet for two working days, then sign-off. |
 | 3 | 10, 12, 13 | Step 10 replays all history into the journal (1.10). |

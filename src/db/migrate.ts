@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url';
 import type { Sql } from '../db.js';
 
 /**
- * Resolved from the project root rather than this file, so the same path works under tsx
- * (src/db) and from the compiled build (dist/db), which does not copy .sql files.
+ * Next to this module: src/db/migrations under tsx, dist/db/migrations in the build, which
+ * `npm run build` copies there so production needs neither tsx nor the source tree.
  */
-export const MIGRATIONS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'db', 'migrations');
+export const MIGRATIONS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), 'migrations');
 
 const FILE_NAME = /^(\d{4})_([a-z0-9_]+)\.sql$/;
 
@@ -84,8 +84,12 @@ const ensureTable = async (sql: Sql): Promise<void> => {
   });
 };
 
-const appliedRows = async (sql: Sql): Promise<AppliedRow[]> =>
-  sql<AppliedRow[]>`select version, name, checksum, applied_at from schema_migrations order by version`;
+/** Read-only: a database that has never been migrated simply has nothing applied. */
+const appliedRows = async (sql: Sql): Promise<AppliedRow[]> => {
+  const [table] = await sql`select to_regclass('schema_migrations') is not null as exists`;
+  if (!table?.['exists']) return [];
+  return sql<AppliedRow[]>`select version, name, checksum, applied_at from schema_migrations order by version`;
+};
 
 /**
  * Compares the files with what the database has applied. `changed` means a file was edited
@@ -94,7 +98,6 @@ const appliedRows = async (sql: Sql): Promise<AppliedRow[]> =>
  */
 export const migrationStatus = async (sql: Sql, dir: string = MIGRATIONS_DIR): Promise<MigrationStatus[]> => {
   const files = readMigrations(dir);
-  await ensureTable(sql);
   const applied = new Map((await appliedRows(sql)).map((row) => [row.version, row]));
 
   const status: MigrationStatus[] = files.map((file) => {
@@ -132,6 +135,7 @@ const assertConsistent = (status: MigrationStatus[]): void => {
  * the lock so the second one skips what the first just did.
  */
 export const migrate = async (sql: Sql, dir: string = MIGRATIONS_DIR): Promise<MigrationFile[]> => {
+  await ensureTable(sql);
   assertConsistent(await migrationStatus(sql, dir));
 
   const applied: MigrationFile[] = [];
@@ -158,4 +162,29 @@ export const migrate = async (sql: Sql, dir: string = MIGRATIONS_DIR): Promise<M
     if (ran) applied.push(file);
   }
   return applied;
+};
+
+export interface MigrationSummary {
+  status: 'ok' | 'pending' | 'mismatch';
+  applied: number;
+  pending: string[];
+  mismatched: string[];
+}
+
+/**
+ * What `/ready` reports. `pending` means the code expects tables the database does not have
+ * yet; `mismatch` means an applied file was edited or removed. Neither is safe to serve on.
+ */
+export const summarizeMigrations = async (sql: Sql, dir: string = MIGRATIONS_DIR): Promise<MigrationSummary> => {
+  const status = await migrationStatus(sql, dir);
+  const named = (state: MigrationState[]) =>
+    status.filter((s) => state.includes(s.state)).map((s) => `${s.version}_${s.name}`);
+  const pending = named(['pending']);
+  const mismatched = named(['changed', 'missing']);
+  return {
+    status: mismatched.length > 0 ? 'mismatch' : pending.length > 0 ? 'pending' : 'ok',
+    applied: status.filter((s) => s.state === 'applied').length,
+    pending,
+    mismatched,
+  };
 };

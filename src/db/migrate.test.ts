@@ -2,17 +2,24 @@ import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, beforeEach, describe, it } from 'node:test';
 
 import { type TestSchema, createTestSchema, skipWithoutDb } from '../test/db.js';
-import { MIGRATIONS_DIR, MigrationError, checksum, migrate, migrationStatus, readMigrations } from './migrate.js';
+import { MIGRATIONS_DIR, MigrationError, checksum, migrate, migrationStatus, readMigrations, summarizeMigrations } from './migrate.js';
+
+const copies: string[] = [];
 
 /** A copy of the real migrations that a test may edit, delete from or add to. */
 const copyMigrations = (): string => {
   const dir = mkdtempSync(join(tmpdir(), 'nur-migrations-'));
   cpSync(MIGRATIONS_DIR, dir, { recursive: true });
+  copies.push(dir);
   return dir;
 };
+
+after(() => {
+  for (const dir of copies) rmSync(dir, { recursive: true, force: true });
+});
 
 describe('readMigrations', () => {
   it('reads the real migrations in version order with their checksums', () => {
@@ -44,7 +51,6 @@ describe('migrate', { skip: skipWithoutDb }, () => {
 
   afterEach(async () => {
     await schema.drop();
-    rmSync(dir, { recursive: true, force: true });
   });
 
   it('applies each migration once; running it again applies nothing', async () => {
@@ -100,6 +106,30 @@ describe('migrate', { skip: skipWithoutDb }, () => {
     assert.equal(a.length + b.length, readMigrations(dir).length);
     const [count] = await schema.sql`select count(*)::int as n from schema_migrations`;
     assert.equal(count?.['n'], readMigrations(dir).length);
+  });
+
+  it('reads status without creating anything in an unmigrated database', async () => {
+    await migrationStatus(schema.sql, dir);
+    const [table] = await schema.sql`select to_regclass('schema_migrations') as name`;
+    assert.equal(table?.['name'], null);
+  });
+
+  it('summarises for /ready: pending, then ok, then mismatch', async () => {
+    assert.deepEqual(await summarizeMigrations(schema.sql, dir), {
+      status: 'pending',
+      applied: 0,
+      pending: ['0001_foundations'],
+      mismatched: [],
+    });
+    await migrate(schema.sql, dir);
+    assert.deepEqual(await summarizeMigrations(schema.sql, dir), { status: 'ok', applied: 1, pending: [], mismatched: [] });
+    appendFileSync(join(dir, '0001_foundations.sql'), '\n-- edited\n');
+    assert.deepEqual(await summarizeMigrations(schema.sql, dir), {
+      status: 'mismatch',
+      applied: 0,
+      pending: [],
+      mismatched: ['0001_foundations'],
+    });
   });
 
   it('reports pending, applied and changed in status without changing anything', async () => {

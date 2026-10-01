@@ -16,12 +16,13 @@ npm run verify           # read-only connection check for Neon, Shopify and Post
 | Script | What it does |
 | --- | --- |
 | `npm run dev` | Development server with reload |
-| `npm run build` / `npm start` | Compile to `dist/` and run it (used on Render) |
+| `npm run build` / `npm start` | Clean `dist/`, compile, copy migrations into it; then run it (used on Render) |
 | `npm run typecheck` | TypeScript, no emit |
 | `npm run verify` | Checks every configured integration, read-only |
 | `npm test` / `npm run test:watch` | `node:test` over `src/**/*.test.ts`, once or on change |
 | `npm run migrate` | Applies pending migrations from `src/db/migrations/`; refuses if an applied file changed |
 | `npm run migrate:status` | Applied, pending, changed or missing, per migration; exits 1 on changed or missing |
+| `npm run migrate:prod` | Same as `migrate`, from the compiled build, without `tsx` |
 | `npm run seed` | Upserts `stores` and `postex_accounts` from config; safe to repeat |
 
 ## Configuration
@@ -38,7 +39,7 @@ values: `SHOPIFY_*` and `POSTEX_TOKEN` for NUR by Juggun, `SHOPIFY_ORGANICS_*` a
 | Route | Purpose |
 | --- | --- |
 | `GET /health` | Liveness: the process is up |
-| `GET /ready` | Readiness: database reachable (503 when it is not) |
+| `GET /ready` | Readiness: database reachable and every migration applied unchanged (503 otherwise) |
 | `GET /api/v1/integrations/status` | Which stores and PostEx accounts are configured. Never returns a credential |
 
 ## Layout
@@ -57,8 +58,15 @@ src/
   integrations/postex/      read-only PostEx client + verified response types
   integrations/shopify/     Admin GraphQL client, 24-hour token cache
   scripts/verify.ts         read-only connection check
-  test/                     fixture loader, PII masking, fixtures/
+  test/                     fixture loader, PII masking, DB test schemas, fixtures/<source>/
 ```
+
+## Database on start-up
+
+`npm run dev` and `npm start` apply pending migrations and seed `stores` and `postex_accounts`
+from config before serving. Both steps are idempotent and lock-protected, so the web service and
+the worker can start together. If an applied migration was edited, the process refuses to start.
+Set `DB_MIGRATE_ON_BOOT=false` to manage the schema by hand with `npm run migrate`.
 
 ## Tests and fixtures
 
@@ -81,8 +89,13 @@ and its field names differ from its own documentation. Two rules:
   names, phones, addresses and emails at any depth and keeps what matching needs: order names,
   tracking numbers, cities, amounts. Read the file before committing it anyway.
 - Name files `<source>-<endpoint>-<case>.json`, e.g. `postex-track-order-delivered.json` or
-  `shopify-orders-cancelled.json`, and load them with `fixture('postex-track-order-delivered')`.
-  The loader rejects names that break the pattern.
+  `shopify-orders-cancelled.json`, in a folder per source (`fixtures/postex/`,
+  `fixtures/shopify/`), and load them with `fixture('postex-track-order-delivered')`. The loader
+  rejects names that break the pattern.
+
+**The PostEx fixtures are synthetic for now.** They are built from the verified field names and
+carry a `_fixture` note saying so. Replace each with a masked recording of the same name; the
+mapper tests then run against real data with no code change.
 
 ## Rules this code follows
 
