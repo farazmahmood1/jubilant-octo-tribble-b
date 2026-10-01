@@ -67,7 +67,8 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
   const rows = await deps.sql<Row[]>`
     select s.id, a.key as account, a.store_id, s.tracking_number, s.order_ref_number, s.order_id, s.cod_amount_paisa::text as cod,
            s.status_code, s.booked_at, s.status_updated_at,
-           o.order_number, o.total_paisa::text as order_total, o.financial_status, o.channel,
+           o.order_number, o.total_paisa::text as order_total, o.financial_status,
+           case when shipment_is_pr(s.id) then 'pr' else o.channel end as channel,
            coalesce((select array_agg(distinct e.code order by e.code) from shipment_events e where e.shipment_id = s.id), '{}') as codes
     from shipments s
     join postex_accounts a on a.id = s.postex_account_id

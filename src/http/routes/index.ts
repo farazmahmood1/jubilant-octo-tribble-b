@@ -9,6 +9,7 @@ import { consignmentRouter } from './consignment.js';
 import { healthRouter } from './health.js';
 import { influencersRouter } from './influencers.js';
 import { integrationsRouter } from './integrations.js';
+import { prRouter } from './pr.js';
 import { purchasingRouter } from './purchasing.js';
 import { reconciliationRouter } from './reconciliation.js';
 import { reportsRouter } from './reports.js';
@@ -34,5 +35,6 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(reportsRouter(getSql));
   apiRouter.use(purchasingRouter(getSql));
   apiRouter.use(consignmentRouter(getSql));
+  apiRouter.use(prRouter(getSql));
   return apiRouter;
 };

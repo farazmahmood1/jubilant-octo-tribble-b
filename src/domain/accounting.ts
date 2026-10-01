@@ -571,7 +571,8 @@ export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Prom
         booked_at: Date | null; created_at: Date;
       }[]
     >`
-      select s.tracking_number, s.postex_account_id, a.store_id as account_store, s.order_id, o.store_id as order_store, o.channel,
+      select s.tracking_number, s.postex_account_id, a.store_id as account_store, s.order_id, o.store_id as order_store,
+             case when shipment_is_pr(s.id) then 'pr' else o.channel end as channel,
              o.total_paisa::text as total, o.tax_paisa::text as tax, o.placed_at, s.cod_amount_paisa::text as cod, s.booked_at, s.created_at
       from shipments s join postex_accounts a on a.id = s.postex_account_id left join orders o on o.id = s.order_id
       where s.id = ${shipmentId}

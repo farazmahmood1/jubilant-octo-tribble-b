@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
 import { postConsignmentSale, postPayoutLine, postShipmentAccounting } from '../domain/accounting.js';
+import { classifyPrSend, detectPrSends, listPrSends } from '../domain/pr.js';
 import { reconcileShipmentStock } from '../domain/stock.js';
 import { paisa } from '../lib/money.js';
 import { skipWithoutDb } from '../test/db.js';
-import { addEvent, orderWithLines, parcel, variantsIn } from '../test/inventory.js';
+import { addEvent, orderWithLines, parcel, testUser, variantsIn } from '../test/inventory.js';
 import { type Stores, migratedWithStores } from '../test/stores.js';
 import {
   REPORT_PLANS,
@@ -334,5 +335,54 @@ describe('product breakdown: each parcel\'s ledger lines split across its items,
     }
     const october = await productBreakdown(s.schema.sql, { from: '2026-10-01' });
     assert.deepEqual(october.rows.map((r) => [r.key, r.units, r.revenue]), [[cream!, -3, rs(-999)]], 'the return lands in October');
+  });
+});
+
+describe('PR classified by a person: out of revenue, the return rate and delivery success', { skip: skipWithoutDb }, () => {
+  it('two zero-COD parcels on ordinary orders count until a person classifies them as PR, then neither does', async (t) => {
+    const s = await migratedWithStores();
+    t.after(() => s.schema.drop());
+    const actor = await testUser(s.schema.sql);
+    const [account] = await s.schema.sql<{ id: string }[]>`insert into postex_accounts (key, label, store_id) values ('nur', 'NUR', ${s.nur}) returning id`;
+    const [variant] = await variantsIn(s.schema.sql, s.nur, 1);
+    await s.schema.sql`insert into product_costs (variant_id, unit_cost_paisa, effective_from, source) values (${variant!}, '45000', '2026-01-01', 'manual')`;
+    const sale = async (number: string, cod: number, events: Array<[string, string]>) => {
+      const orderId = await orderWithLines(s.schema.sql, { storeId: s.nur, number, placedAt: new Date('2026-09-01T05:00:00Z'), totalPaisa: BigInt(cod) * 100n, lines: [{ variantId: variant!, qty: 1 }] });
+      const shipmentId = await parcel(s.schema.sql, { accountId: account!.id, orderId, events });
+      await s.schema.sql`update shipments set cod_amount_paisa = ${String(cod * 100)} where id = ${shipmentId}`;
+      await reconcileShipmentStock(s.schema.sql, shipmentId);
+      await postShipmentAccounting(s.schema.sql, shipmentId);
+      return shipmentId;
+    };
+    await sale('#S1', 2500, [['0005', '2026-09-03T10:00:00Z']]);
+    await sale('#S2', 2000, [['0013', '2026-09-02T10:00:00Z'], ['0040', '2026-09-03T10:00:00Z'], ['0006', '2026-09-06T10:00:00Z']]);
+    // A PR package sent as an order with a price, COD waived: delivered. Another refused at the door.
+    const delivered = await sale('#PR1', 0, [['0005', '2026-09-04T10:00:00Z']]);
+    const refused = await sale('#PR2', 0, [['0013', '2026-09-04T10:00:00Z'], ['0040', '2026-09-05T10:00:00Z'], ['0006', '2026-09-08T10:00:00Z']]);
+    await s.schema.sql`update orders set total_paisa = 300000 where order_number in ('#PR1', '#PR2')`;
+    for (const id of [delivered, refused]) await postShipmentAccounting(s.schema.sql, id);
+
+    const figures = async () => ({
+      revenue: (await deliveredRevenue(s.schema.sql)).parcels,
+      returnRate: await returnRate(s.schema.sql),
+      success: (await deliverySuccess(s.schema.sql)).success,
+      revenueParcels: (await drillDeliveredRevenue(s.schema.sql)).shipmentIds,
+    });
+    const before = await figures();
+    assert.deepEqual([before.returnRate.of, before.success.of], [4, 4], 'unclassified, they count like any parcel');
+    assert.ok(before.revenueParcels.includes(delivered), 'the zero-COD parcel on a priced order is a sale until classified');
+
+    await detectPrSends(s.schema.sql);
+    const suggestions = await listPrSends(s.schema.sql, { status: 'suggested' });
+    assert.equal(suggestions.length, 2);
+    for (const send of suggestions) await classifyPrSend(s.schema.sql, { sendId: send.id, classification: 'pr', actorId: actor });
+
+    const after = await figures();
+    assert.equal(after.revenue, rs(2500), 'revenue: the one real sale');
+    const [net] = await s.schema.sql<{ v: string }[]>`select coalesce(sum(credit_paisa - debit_paisa), 0)::text as v from ledger_lines where account_code = '4000' and shipment_id = ${delivered}`;
+    assert.equal(net?.v, '0', 'its earlier sale is reversed: it nets to nothing');
+    assert.deepEqual(after.returnRate, { count: 1, of: 2, rate: 0.5 }, 'return rate: the refused PR package is not a lost sale');
+    assert.deepEqual([after.success.count, after.success.of], [1, 2], 'delivery success: the PR parcels are out');
+    assert.ok(!(await drillReturnRate(s.schema.sql)).shipmentIds.includes(refused));
   });
 });

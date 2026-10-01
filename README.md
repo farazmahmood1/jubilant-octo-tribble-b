@@ -385,6 +385,34 @@ import as a unit: units back to the partner, every entry reversed, invoices void
 file can be imported again. Also: `GET|POST /api/v1/consignment/partners`,
 `GET .../partners/:id/stock`, `POST /api/v1/consignment/transfers`, `GET /api/v1/consignment/imports`.
 
+## Influencer PR
+
+Migration `0016_pr.sql` (Batch H, PR half), rules in `src/domain/pr.ts`. A PR send is marketing:
+no sale, not a return when it comes back, its goods and PostEx charges expensed to 6100.
+
+**Detection** (`pr:detect`, hourly; or `POST /api/v1/pr/detect`) finds sends made outside the
+platform and only ever inserts, so a re-run changes nothing and never touches a decided send:
+a Shopify order tagged `PR` is PR (the team marked it); an order discounted to zero, and a PostEx
+parcel with zero COD, are **suggestions**. CLAUDE.md and note S16: each zero-COD parcel is
+classified by a person (PR, replacement, gift, or not PR), never assumed to be PR.
+
+**Classifying** (`POST /api/v1/pr/sends/:id/classify`) is audited and takes effect at once:
+`shipment_is_pr()` is the one definition stock, accounting, order state and every report read, so
+the parcel's moves and postings are re-derived in the same transaction. A PR parcel's goods go
+`in_transit → marketing` on delivery and a refused one comes back through `returning` (note S10,
+which the build plan applies instead of moving PR stock at send time). A send with no order lines
+(booked outside Shopify, or handed over) is entered with its goods (`POST /api/v1/pr/sends`), which
+move `warehouse → marketing` at cost. Changing a classification undoes the previous effects.
+
+Revenue, the return rate and delivery success all exclude PR parcels (asserted in the report
+tests). Discount codes credit orders to their influencer (see *Influencers*); posts are recorded
+with `GET|POST /api/v1/influencers/:id/posts`. `GET /api/v1/pr/sends?status=suggested|decided|pr`
+lists sends with what each cost in marketing.
+
+**On the real data:** run `npm run job -- pr:detect` once after deploying; its `zeroCod` count
+should be the 54 zero-COD parcels measured in the spike. They then wait in the suggested list
+for a person to classify.
+
 ## Reports
 
 `src/reports/` computes every dashboard number once, in SQL, from the ledger (Step 14): one file

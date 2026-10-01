@@ -216,7 +216,7 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
     const [parcel] = await tx<
       { tracking_number: string; order_id: string | null; channel: 'online' | 'consignment' | 'pr' | null; store_id: string | null; booked_at: Date | null; created_at: Date }[]
     >`
-      select s.tracking_number, s.order_id, o.channel, o.store_id, s.booked_at, s.created_at
+      select s.tracking_number, s.order_id, case when shipment_is_pr(s.id) then 'pr' else o.channel end as channel, o.store_id, s.booked_at, s.created_at
       from shipments s left join orders o on o.id = s.order_id
       where s.id = ${shipmentId}
       for update of s

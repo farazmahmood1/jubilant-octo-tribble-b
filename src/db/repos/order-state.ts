@@ -30,7 +30,7 @@ export interface StateChange {
 export const recomputeOrderState = async (db: Db, orderId: string): Promise<StateChange> =>
   atomically(db, async (tx) => {
     const [order] = await tx<{ state: OrderState | null; channel: 'online' | 'consignment' | 'pr'; cancelled_at: Date | null; fulfillment_status: string | null }[]>`
-      select state, channel, cancelled_at, fulfillment_status from orders where id = ${orderId} for update
+      select state, case when order_is_pr(id) then 'pr' else channel end as channel, cancelled_at, fulfillment_status from orders where id = ${orderId} for update
     `;
     if (!order) throw new Error(`Order ${orderId} not found`);
     const [parcel] = await tx<{ id: string; tracking_number: string }[]>`
