@@ -358,6 +358,34 @@ API (signed in; amounts are integer paisa in strings): `GET|POST /api/v1/purchas
 `POST .../orders/:id/bills`, `GET .../bills?unpaid=true`, `POST .../bills/:id/payments`,
 `GET .../reorder-suggestions?store=&windowDays=&coverDays=`, `GET|PUT /api/v1/settings/purchasing`.
 
+## Order history import
+
+Shopify's API returns the last 60 days; older orders come from each store's order export CSV
+(Shopify admin → Orders → Export → All orders, CSV for Excel), migration
+`0017_order_csv_imports.sql`, rules in `src/domain/order-import.ts`.
+
+- **Declared mapping.** `EXPORT_COLUMNS` names the Shopify header each field is read from
+  (`GET /api/v1/orders/import/columns`); `Id`, `Name`, `Created at`, `Total` and the line item
+  quantity, name and price are required. Nothing is inferred. SKUs link lines to products.
+- **One row per order, the API's winning.** Imported orders are stored with
+  `source = 'csv_import'` under the same key as API orders (store, Shopify order id). An order the
+  API already stored is left exactly as it is; the API sync, meeting an imported order, overwrites
+  it, lines included, and it becomes `api`. A different order already holding the same order
+  number is reported, not merged.
+- **Dry run, then commit.** `POST /api/v1/orders/import/dry-run?store=nur&fileName=…` with the
+  file as the `text/csv` body (up to 25 MB) writes nothing and reports what the commit would do
+  and every malformed row by number. `POST /api/v1/orders/import?…` imports every well-formed
+  order (each in its own transaction); an order with any malformed row is skipped whole and
+  reported, and the rest go in. Running the same file again changes nothing. Each run is
+  recorded (`GET /api/v1/orders/imports`) and audited.
+- **Matching.** After a commit the T05 matcher runs over the store's still-unmatched parcels, so
+  pre-window PostEx parcels find their orders; their stock, postings and order state follow.
+- Names, phones and addresses go to `customers`/`addresses`, where redaction finds them;
+  `orders.raw` holds only the file's hash and row numbers.
+
+For a file too large to upload: `npm run orders:import -- nur ./orders_export.csv` (dry run),
+then again with `--commit`.
+
 ## Consignment
 
 Stock at a retail partner stays ours until it sells (migration `0015_consignment.sql`, rules in

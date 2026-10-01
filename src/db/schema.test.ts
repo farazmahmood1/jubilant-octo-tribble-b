@@ -50,7 +50,7 @@ describe('schema', { skip: skipWithoutDb }, () => {
       [
         'accounts', 'addresses', 'app_settings', 'audit_log', 'bank_lines', 'bank_statements', 'bill_lines', 'cod_payouts', 'confirmation_attempts',
         'confirmations', 'consignment_transfer_lines', 'consignment_transfers', 'customers', 'fiscal_periods', 'goods_receipts', 'gr_lines', 'influencer_codes', 'influencer_posts', 'influencers',
-        'integration_cursors', 'invoice_lines', 'invoices', 'journal_entries', 'journal_lines', 'locations', 'order_lines',
+        'integration_cursors', 'invoice_lines', 'invoices', 'journal_entries', 'journal_lines', 'locations', 'order_csv_imports', 'order_lines',
         'order_state_log', 'orders', 'partner_sales', 'partner_sales_imports', 'payments', 'payout_lines', 'po_lines', 'postex_accounts', 'pr_send_lines', 'pr_sends', 'product_costs', 'products',
         'purchase_orders', 'purchase_requests', 'quotation_lines', 'quotations', 'reconciliation_items', 'retail_partners', 'return_check_ins', 'schema_migrations', 'shipment_charges', 'shipment_events', 'shipments',
         'shopify_stock_levels',
