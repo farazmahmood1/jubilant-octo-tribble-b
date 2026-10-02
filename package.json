@@ -24,6 +24,8 @@
     "dev:worker": "tsx watch src/index.worker.ts",
     "start:worker": "node dist/index.worker.js",
     "postex:totals": "tsx src/scripts/postex-totals.ts",
+    "sync:status": "tsx src/scripts/sync-status.ts",
+    "postex:repair-dates": "tsx src/scripts/repair-postex-dates.ts",
     "match:report": "tsx src/scripts/match-report.ts",
     "accounting:replay": "tsx src/scripts/accounting-replay.ts",
     "orders:states": "tsx src/scripts/order-states.ts",

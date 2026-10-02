@@ -109,12 +109,29 @@ const trackingNumberOf = (parcel: Raw): string => {
   return tracking;
 };
 
+/** An ISO timestamp that states its own offset, as the live API sends: `2026-06-21T20:38:46.000+0500`. */
+const WITH_OFFSET = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+
+/**
+ * PostEx sends both shapes: offset-less Karachi wall time, and (on the live API's booking, pickup and
+ * delivery fields) an explicit offset. A stated offset is honoured as written; anything else is read
+ * as Karachi wall time. An impossible date or clock throws either way.
+ */
+const readPostexTime = (raw: string): Date => {
+  const m = WITH_OFFSET.exec(raw);
+  if (!m) return parsePostexLocal(raw);
+  const [, day, clock, ms = '0', sign, hh = '00', mm = '00'] = m;
+  parsePostexLocal(`${day} ${clock}.${ms}`); // rejects 2026-02-30 and 25:00:00
+  const offsetMs = sign ? (sign === '-' ? -1 : 1) * (Number(hh) * 60 + Number(mm)) * 60_000 : 0;
+  return new Date(Date.parse(`${day}T${clock}.${ms.padEnd(3, '0')}Z`) - offsetMs);
+};
+
 /** Absent or blank is null; present but unreadable is null plus a flag, never a guess. */
 const date = (value: unknown, flags: Set<ShipmentFlag>): Date | null => {
   const raw = text(value);
   if (raw === null) return null;
   try {
-    return parsePostexLocal(raw);
+    return readPostexTime(raw);
   } catch {
     flags.add('invalid_date');
     return null;

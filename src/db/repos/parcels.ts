@@ -25,7 +25,7 @@ export const PARCEL_FLAGS = ['unmatched', 'zero_cod', 'pr', 'not_checked_in', 'c
 export type ParcelFlag = (typeof PARCEL_FLAGS)[number];
 export const PARCEL_SORTS = ['bookedAt', 'statusUpdatedAt', 'cod', 'days'] as const;
 
-const STAGE_SQL = `case s.status_code
+export const STAGE_SQL = `case s.status_code
   when '0005' then 'delivered' when '0013' then 'attempted' when '0040' then 'returning'
   when '0006' then 'returned' when '0002' then 'cancelled'
   else case when s.status_code is null then 'booked' else 'in_transit' end end`;

@@ -773,16 +773,26 @@ export const trialBalance = async (db: Db, options: { to?: string; storeId?: str
  * Rebuilds the journal's view of every parcel and payout from the stored facts (1.10: ledgers
  * are filled by replay). Idempotent: on a journal already in line it posts nothing.
  */
-export const replayAccounting = async (sql: Sql): Promise<{ shipments: number; postings: number; payoutLines: number }> => {
+export const replayAccounting = async (
+  sql: Sql,
+  /** Called after each parcel and payout line, so a script can show how far along the replay is. */
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ shipments: number; postings: number; payoutLines: number }> => {
   const shipments = await sql<{ id: string }[]>`select id from shipments order by id`;
+  const lines = await sql<{ id: string }[]>`select id from payout_lines order by id`;
+  const total = shipments.length + lines.length;
+  let done = 0;
   let postings = 0;
   for (const { id } of shipments) {
     const { actions } = await postShipmentAccounting(sql, id);
     postings += countPostings(actions);
+    onProgress?.(++done, total);
   }
-  const lines = await sql<{ id: string }[]>`select id from payout_lines order by id`;
   let payoutLinesPosted = 0;
-  for (const { id } of lines) if ((await postPayoutLine(sql, id))?.created) payoutLinesPosted++;
+  for (const { id } of lines) {
+    if ((await postPayoutLine(sql, id))?.created) payoutLinesPosted++;
+    onProgress?.(++done, total);
+  }
   return { shipments: shipments.length, postings, payoutLines: payoutLinesPosted };
 };
 

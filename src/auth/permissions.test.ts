@@ -101,6 +101,8 @@ describe('what each role may do, through the policy', () => {
     // [method, path, roles that may, roles that may not]
     ['GET', '/confirmations/queue', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
     ['POST', '/confirmations/orders/1/attempts', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
+    ['GET', '/orders', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
+    ['GET', '/orders/cities', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
     ['GET', '/parcels', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
     ['POST', '/stock/returns/1/check-in', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
     ['GET', '/reconciliation/items', ['owner', 'manager', 'operations', 'accountant'], ['agent']],

@@ -136,6 +136,7 @@ export const ROUTE_POLICY: readonly Rule[] = [
   { path: /^\/purchasing\//, read: 'purchasing.read', write: 'purchasing.write' },
   { path: /^\/consignment\//, read: 'partners.read', write: 'partners.write' },
   { path: /^\/orders\/imports?(\/|$)/, read: 'orders.import', write: 'orders.import' },
+  { path: /^\/orders(\/|$)/, read: 'orders.read' },
   { path: /^\/parcels(\/|$)/, read: 'parcels.read' },
 ];
 

@@ -94,6 +94,18 @@ describe('toShipment', () => {
     assert.deepEqual(shipment.flags, ['invalid_amount', 'invalid_date', 'no_status_history']);
   });
 
+  it('reads the live API\'s dates, which carry their own offset', () => {
+    const shipment = toShipment({
+      trackingNumber: '1',
+      transactionDate: '2026-06-21T20:38:46.000+0500',
+      orderDeliveryDate: '2026-06-27T16:00:00.000+05:00',
+    });
+    assert.equal(shipment.bookedAt?.toISOString(), '2026-06-21T15:38:46.000Z');
+    assert.equal(shipment.deliveredAt?.toISOString(), '2026-06-27T11:00:00.000Z');
+    assert.ok(!shipment.flags.includes('invalid_date'));
+    assert.ok(toShipment({ trackingNumber: '1', transactionDate: '2026-02-30T10:00:00.000+0500' }).flags.includes('invalid_date'));
+  });
+
   it('accepts a numeric-string amount', () => {
     assert.equal(toShipment({ trackingNumber: '1', invoicePayment: '2,750.00' }).codAmount, 275_000n);
   });

@@ -352,6 +352,8 @@ export interface CommitReport extends ImportReport {
 export const commitOrderImport = async (
   sql: Sql,
   input: { store: 'nur' | 'organics'; fileName: string; csv: string; actorId: string },
+  /** Called as each order is stored, then as each parcel is matched, for a script's progress bar. */
+  onProgress?: (stage: 'orders' | 'matching', done: number, total: number) => void,
 ): Promise<CommitReport> => {
   const report = await dryRunOrderImport(sql, input.store, input.csv);
   if (report.fileErrors.length > 0) return { ...report, importId: '', inserted: 0, updated: 0, unchanged: 0, parcelsMatched: 0 };
@@ -364,7 +366,9 @@ export const commitOrderImport = async (
   let inserted = 0;
   let updated = 0;
   let unchanged = 0;
+  let processed = 0;
   for (const order of parsed.orders) {
+    onProgress?.('orders', processed++, parsed.orders.length);
     try {
       const result = await atomically(sql, async (tx) => {
         // Decided inside the transaction: the API sync may have stored the order meanwhile.
@@ -391,11 +395,16 @@ export const commitOrderImport = async (
     }
   }
 
+  onProgress?.('orders', parsed.orders.length, parsed.orders.length);
+
   // Pre-window parcels that had no order to match until now.
   const counts: MatchCounts = { matched: 0, suggested: 0, unmatched: 0 };
   const accounts = await sql<{ id: string; key: string }[]>`select id, key from postex_accounts where store_id = ${storeId} order by id`;
   for (const account of accounts) {
-    for (const shipmentId of await matchUnmatched(sql, account, counts)) {
+    const matched = await matchUnmatched(sql, account, counts);
+    let relinked = 0;
+    for (const shipmentId of matched) {
+      onProgress?.('matching', relinked++, matched.length);
       const stock = await reconcileShipmentStock(sql, shipmentId);
       if (stock.orderId) await recomputeOrderState(sql, stock.orderId);
       await postShipmentAccounting(sql, shipmentId);

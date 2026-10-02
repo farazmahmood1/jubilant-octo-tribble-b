@@ -8,6 +8,7 @@
 import { closeDb, db } from '../db.js';
 import { jobs } from '../jobs/registry.js';
 import { JobRunner, UnknownJobError, exitCodeFor } from '../jobs/runner.js';
+import { spinner } from '../lib/progress.js';
 import { logger } from '../logger.js';
 
 const run = async (name: string | undefined): Promise<number> => {
@@ -25,7 +26,9 @@ const run = async (name: string | undefined): Promise<number> => {
   }
 
   try {
-    const result = await runner.runJobOnce(name);
+    // A sync pulls pages from an API with no known total, so show it is alive rather than a percentage.
+    const stop = spinner(`Running ${name}`);
+    const result = await runner.runJobOnce(name).finally(stop);
     const detail = result.error ? ` — ${result.error}` : '';
     console.log(`${result.job} (${result.accountRef}): ${result.status} in ${result.durationMs} ms ${JSON.stringify(result.stats)}${detail}`);
     return exitCodeFor(result);

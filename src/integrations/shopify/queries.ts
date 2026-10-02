@@ -1,7 +1,9 @@
 /**
  * Admin GraphQL documents for the catalogue and order syncs (API version from config).
  *
- * Only the customer fields delivery needs are requested: names and phones, never email (1.9).
+ * Only the customer fields delivery needs are requested: the shipping address's name and phone, never email (1.9).
+ * The `customer` object is not requested: it needs the read_customers scope, which the app does not have.
+ * Customers are keyed by phone instead, the same as in the CSV import, so both sources agree.
  * Lists nested inside a node (variants of a product, line items of an order) are fetched 100
  * at a time; the rare node with more is completed by the follow-up queries below.
  */
@@ -81,7 +83,6 @@ const ORDER_FIELDS = `
   totalShippingPriceSet { ${MONEY} }
   totalTaxSet { ${MONEY} }
   totalPriceSet { ${MONEY} }
-  customer { id firstName lastName phone }
   shippingAddress { name phone address1 address2 city province zip countryCodeV2 }
   lineItems(first: ${NESTED_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { ${LINE_FIELDS} } }
 `;

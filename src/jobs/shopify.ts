@@ -108,6 +108,18 @@ const restOf = async <T>(
   return all;
 };
 
+interface DuplicateSku {
+  sku: string;
+  product: string;
+  variant: string;
+  shopifyVariantId: string;
+  usedBy: string;
+}
+
+const isDuplicateSku = (error: unknown): boolean =>
+  (error as { code?: string; constraint_name?: string } | null)?.code === '23505' &&
+  (error as { constraint_name?: string }).constraint_name === 'variants_store_sku_key';
+
 /**
  * Every product and variant of each store. The catalogue is small, so each run reads all of it:
  * no cursor, nothing to resume. A variant the database refuses (most likely a SKU used twice in
@@ -124,6 +136,7 @@ export const syncCatalogue = async (deps: SyncDeps): Promise<JobStats> => {
     perStore.set(store.key, counts);
     const seenProducts: string[] = [];
     const seenVariants: string[] = [];
+    const duplicateSkus: DuplicateSku[] = [];
     let complete = true;
     let after: string | null = null;
     do {
@@ -149,7 +162,22 @@ export const syncCatalogue = async (deps: SyncDeps): Promise<JobStats> => {
             if (result.changed) counts.changed++;
           } catch (error) {
             counts.skipped++;
-            deps.logger.warn({ store: store.key, shopifyVariantId: String(variant.shopifyVariantId), sku: variant.sku, err: error }, 'Variant skipped');
+            if (isDuplicateSku(error) && variant.sku) {
+              // The usual cause, and fixed in Shopify, so one line each rather than a stack trace.
+              const [owner] = await deps.sql<{ title: string; variant_title: string; shopify_variant_id: string }[]>`
+                select p.title, v.title as variant_title, v.shopify_variant_id::text from variants v join products p on p.id = v.product_id
+                where v.store_id = ${store.id} and v.sku = ${variant.sku}
+              `;
+              duplicateSkus.push({
+                sku: variant.sku,
+                product: node.title,
+                variant: variant.title,
+                shopifyVariantId: String(variant.shopifyVariantId),
+                usedBy: owner ? `${owner.title} / ${owner.variant_title} (variant ${owner.shopify_variant_id})` : 'another variant',
+              });
+            } else {
+              deps.logger.warn({ store: store.key, shopifyVariantId: String(variant.shopifyVariantId), sku: variant.sku, err: error }, 'Variant skipped');
+            }
           }
         }
       }
@@ -175,6 +203,13 @@ export const syncCatalogue = async (deps: SyncDeps): Promise<JobStats> => {
       select count(*)::int as n from variants where store_id = ${store.id} and sku is null and deleted_at is null
     `;
     counts['unmappedSkus'] = row?.n ?? 0;
+    counts['duplicateSkus'] = duplicateSkus.length;
+    if (duplicateSkus.length > 0) {
+      deps.logger.warn(
+        { store: store.key, variants: duplicateSkus },
+        `${duplicateSkus.length} variants skipped: their SKU is already used by another variant. Give each a unique SKU in Shopify (or clear it) and run shopify:catalogue again`,
+      );
+    }
     if (complete) await syncInventory(deps, store, counts);
   }
   return flatten(perStore);

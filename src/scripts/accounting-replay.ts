@@ -6,6 +6,7 @@
 import { closeDb, db } from '../db.js';
 import { replayAccounting, trialBalance } from '../domain/accounting.js';
 import { paisa, toRupeeString } from '../lib/money.js';
+import { progressBar } from '../lib/progress.js';
 
 const rs = (amount: bigint) => `PKR ${toRupeeString(paisa(amount))}`.padStart(22);
 
@@ -15,7 +16,10 @@ const run = async (): Promise<number> => {
     console.error('DATABASE_URL is not set');
     return 2;
   }
-  const replay = await replayAccounting(sql);
+  const [counts] = await sql<{ n: number }[]>`select (select count(*) from shipments)::int + (select count(*) from payout_lines)::int as n`;
+  const bar = progressBar('Replaying accounting', counts!.n);
+  const replay = await replayAccounting(sql, (done) => bar.update(done));
+  bar.finish();
   console.log(`\nReplayed ${replay.shipments} parcels: ${replay.postings} postings, ${replay.payoutLines} payout lines posted.\n`);
   const tb = await trialBalance(sql);
   console.log(`  ${'Account'.padEnd(52)}${'Debit'.padStart(22)}${'Credit'.padStart(22)}`);

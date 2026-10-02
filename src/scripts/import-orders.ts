@@ -11,6 +11,7 @@ import { basename } from 'node:path';
 import { config } from '../config.js';
 import { closeDb, db } from '../db.js';
 import { type ImportReport, commitOrderImport, dryRunOrderImport } from '../domain/order-import.js';
+import { type Progress, progressBar } from '../lib/progress.js';
 
 const print = (report: ImportReport) => {
   for (const error of report.fileErrors) console.error(`File: ${error}`);
@@ -40,7 +41,19 @@ const run = async (): Promise<number> => {
   const [actor] = await sql<{ id: string }[]>`
     insert into users (email, name, role) values (${email}, ${email}, 'owner') on conflict (email) do update set name = users.name returning id
   `;
-  const report = await commitOrderImport(sql, { store, fileName: basename(path), csv, actorId: actor!.id });
+  // One bar per stage: the orders, then the parcels the matcher links to them (once per PostEx account).
+  let bar: Progress | undefined;
+  let current = '';
+  const report = await commitOrderImport(sql, { store, fileName: basename(path), csv, actorId: actor!.id }, (stage, done, total) => {
+    const key = `${stage}:${total}`;
+    if (key !== current) {
+      bar?.finish();
+      bar = progressBar(stage === 'orders' ? 'Importing orders ' : 'Matching parcels', total);
+      current = key;
+    }
+    bar!.update(done);
+  });
+  bar?.finish();
   print(report);
   console.log(`\nInserted ${report.inserted}, updated ${report.updated}, unchanged ${report.unchanged}; ${report.parcelsMatched} parcels matched.`);
   return report.fileErrors.length > 0 ? 1 : 0;
