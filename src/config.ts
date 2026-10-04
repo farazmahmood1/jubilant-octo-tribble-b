@@ -50,6 +50,12 @@ const schema = z.object({
   AUTH_PASSWORD: z.string().default('change-me'),
   AUTH_SECRET: z.string().optional(),
   AUTH_SESSION_HOURS: z.coerce.number().int().positive().default(12),
+  // The one write to Shopify the plan allows: the confirmation tag, set when the desk records a call.
+  // Off unless this is true, and it needs the write_orders scope on the Shopify app.
+  SHOPIFY_WRITE_CONFIRMATION_TAGS: z
+    .string()
+    .optional()
+    .transform((v) => v?.toLowerCase() === 'true'),
   POSTEX_ALLOW_WRITES: z
     .string()
     .optional()
@@ -129,6 +135,7 @@ export const config = {
   migrateOnBoot: values.DB_MIGRATE_ON_BOOT,
   shopify: {
     apiVersion: values.SHOPIFY_API_VERSION,
+    writeConfirmationTags: values.SHOPIFY_WRITE_CONFIRMATION_TAGS,
     stores: [
       shopifyStore('nur', 'NUR by Juggun', 'SHOPIFY_'),
       shopifyStore('organics', "Juggun's Organics", 'SHOPIFY_ORGANICS_'),

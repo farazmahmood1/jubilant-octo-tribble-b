@@ -1,12 +1,11 @@
-import { type AttemptFact, DEFAULT_DESK_SETTINGS, type DerivedConfirmation, type DeskSettings, deriveConfirmation } from '../../domain/confirmation.js';
+import { type DerivedConfirmation, confirmationOf } from '../../domain/confirmation.js';
 import type { ConfirmationState } from '../../domain/order-state.js';
 import { type Db, atomically } from './upsert.js';
 
 /**
- * Each online order's confirmation (Step 11), as the Confirmation Desk's attempts make it, or
- * before the desk's first attempt, as the team's Shopify tags make it (3.2 note S7). Written only
- * by `recomputeConfirmation`, which the order state recompute calls first, so a confirmation and
- * the order state it decides never disagree (rule 7).
+ * Each online order's confirmation (Step 11), as the team's Shopify tags make it (3.2 note S7).
+ * Written only by `recomputeConfirmation`, which the order state recompute calls first, so a
+ * confirmation and the order state it decides never disagree (rule 7).
  */
 
 /**
@@ -64,47 +63,23 @@ export const confirmationFromTags = (orderTags: readonly string[], map: Confirma
   return null;
 };
 
-/** `app_settings` key `confirmation_desk`, over the defaults; a partial setting keeps the rest. */
-export const deskSettings = async (db: Db): Promise<DeskSettings> => {
-  const [row] = await db<{ value: Partial<DeskSettings> }[]>`select value from app_settings where key = 'confirmation_desk'`;
-  const value = row?.value ?? {};
-  return {
-    ...DEFAULT_DESK_SETTINGS,
-    ...value,
-    deskHours: { ...DEFAULT_DESK_SETTINGS.deskHours, ...(value.deskHours ?? {}) },
-    whatsappTemplates: { ...DEFAULT_DESK_SETTINGS.whatsappTemplates, ...(value.whatsappTemplates ?? {}) },
-  };
-};
-
 /**
- * Recomputes one order's confirmation and stores it. Null for an order the desk never confirms:
- * PR packages and consignment sales. Safe to run any number of times.
+ * Recomputes one order's confirmation from its tags and stores it. Null for an order that is never
+ * confirmed: PR packages and consignment sales. Safe to run any number of times.
+ *
+ * The desk columns (agent, attempts, next attempt) held the call outcomes the platform once
+ * recorded itself. They are cleared, so an order the old desk worked follows its tags like any other.
  */
 export const recomputeConfirmation = async (db: Db, orderId: string): Promise<DerivedConfirmation | null> =>
   atomically(db, async (tx) => {
-    const [order] = await tx<{ channel: string; placed_at: Date; tags: string[] }[]>`
-      select channel, placed_at, tags from orders where id = ${orderId}
-    `;
+    const [order] = await tx<{ channel: string; tags: string[] }[]>`select channel, tags from orders where id = ${orderId}`;
     if (!order || order.channel !== 'online') return null;
-    const attempts = await tx<{ id: string; agent_id: string; outcome: AttemptFact['outcome']; at: Date; follow_up_at: Date | null; reason: string | null }[]>`
-      select a.id, a.agent_id, a.outcome, a.at, a.follow_up_at, a.reason
-      from confirmation_attempts a join confirmations c on c.id = a.confirmation_id
-      where c.order_id = ${orderId}
-    `;
-    const derived = deriveConfirmation({
-      placedAt: order.placed_at,
-      attempts: attempts.map((a) => ({ id: a.id, agentId: a.agent_id, outcome: a.outcome, at: a.at, followUpAt: a.follow_up_at, reason: a.reason })),
-      fromTags: confirmationFromTags(order.tags, await confirmationTags(tx)),
-      settings: await deskSettings(tx),
-    });
+    const derived = confirmationOf(confirmationFromTags(order.tags, await confirmationTags(tx)));
     await tx`
-      insert into confirmations (order_id, state, source, agent_id, attempts, next_attempt_at, outcome_reason, confirmed_at, last_attempt_at)
-      values (${orderId}, ${derived.state}, ${derived.source}, ${derived.agentId}, ${derived.attempts}, ${derived.nextAttemptAt},
-              ${derived.outcomeReason}, ${derived.confirmedAt}, ${derived.lastAttemptAt})
+      insert into confirmations (order_id, state, source) values (${orderId}, ${derived.state}, ${derived.source})
       on conflict (order_id) do update set
-        state = excluded.state, source = excluded.source, agent_id = excluded.agent_id, attempts = excluded.attempts,
-        next_attempt_at = excluded.next_attempt_at, outcome_reason = excluded.outcome_reason,
-        confirmed_at = excluded.confirmed_at, last_attempt_at = excluded.last_attempt_at
+        state = excluded.state, source = excluded.source, agent_id = null, attempts = 0,
+        next_attempt_at = null, outcome_reason = null, confirmed_at = null, last_attempt_at = null
     `;
     return derived;
   });

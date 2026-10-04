@@ -33,7 +33,14 @@ export const bookedWhere = (db: Db, f: ReportFilter, alias = 's'): Fragment => d
   ${f.store ? db`and ${db(alias)}.postex_account_id in (select id from postex_accounts where store_id = (select id from stores where key = ${f.store}))` : db``}
 `;
 
-export const todayInKarachi = (): string => formatKarachi(new Date()).slice(0, 10);
+/** Orders placed in the filter's days (Karachi), for the store. `alias` is the orders alias. */
+export const placedWhere = (db: Db, f: ReportFilter, alias = 'o'): Fragment => db`
+  ${f.from ? db`and ${db(alias)}.placed_at >= ${startOfKarachiDate(f.from)}` : db``}
+  ${f.to ? db`and ${db(alias)}.placed_at <= ${endOfKarachiDay(f.to)}` : db``}
+  ${f.store ? db`and ${db(alias)}.store_id = (select id from stores where key = ${f.store})` : db``}
+`;
+
+export const todayInKarachi =(): string => formatKarachi(new Date()).slice(0, 10);
 
 /** A share as numerator, denominator and the rate; null rate when there is nothing to divide. */
 export interface Rate {

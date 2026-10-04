@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
+import { can } from '../../auth/permissions.js';
+import { orderDetail } from '../../db/repos/order-detail.js';
 import { ORDER_CHANNELS, ORDER_FLAGS, ORDER_SORTS, ORDER_STATES, listOrders, orderCities } from '../../db/repos/order-list.js';
-import { type SqlProvider, requireSql } from '../middleware/database.js';
-import { parse } from '../validate.js';
+import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
+import { HttpError } from '../middleware/errors.js';
+import { ID, parse } from '../validate.js';
 
 /**
  * Orders, read-only: the list with search and filters, and the cities to filter by. The parameters
@@ -65,6 +68,18 @@ export const ordersRouter = (getSql: SqlProvider): Router => {
 
   router.get('/orders/cities', async (_req, res) => {
     res.json({ cities: await orderCities(requireSql(getSql)) });
+  });
+
+  /**
+   * One order in full. Customers' phone numbers and street addresses go to roles that may see
+   * them, and the books (PostEx charges, payouts, profit) to roles that may read the reports.
+   */
+  router.get('/orders/:id', async (req, res) => {
+    const { id } = parse(z.object({ id: z.string().regex(ID) }), req.params);
+    const { role } = sessionUser(req);
+    const detail = await orderDetail(requireSql(getSql), id, { contact: can(role, 'pii.phone'), books: can(role, 'reports.read') });
+    if (!detail) throw new HttpError(404, `Order ${id} not found`);
+    res.json(detail);
   });
 
   return router;

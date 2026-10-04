@@ -115,3 +115,15 @@ export const ORDER_LINES_QUERY = `
     }
   }
 `;
+
+/**
+ * An order's timeline, newest first (read_orders). There is no webhook for it, so it is read live
+ * when someone opens the order. Comments staff leave in Shopify are events too, with their text.
+ */
+export const ORDER_EVENTS_QUERY = `
+  query OrderEvents($id: ID!) {
+    order(id: $id) {
+      events(first: 100, sortKey: CREATED_AT, reverse: true) { nodes { createdAt action message appTitle attributeToApp } }
+    }
+  }
+`;

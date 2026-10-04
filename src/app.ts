@@ -6,6 +6,7 @@ import { pinoHttp } from 'pino-http';
 import { config } from './config.js';
 import { type Sql, db } from './db.js';
 import { errorHandler, notFound } from './http/middleware/errors.js';
+import type { ConfirmationsOptions } from './http/routes/confirmations.js';
 import { createApiRouter } from './http/routes/index.js';
 import { healthRouter } from './http/routes/health.js';
 import { shopifyWebhookRouter } from './http/routes/shopify-webhooks.js';
@@ -17,6 +18,8 @@ export interface AppOptions {
   webhooks?: () => WebhookDeps | null;
   /** Overrides the database the API routes use; tests point it at a scratch schema. */
   sql?: () => Sql | null | undefined;
+  /** Overrides how the Confirmations page reaches Shopify; tests pass a fake one. */
+  confirmations?: ConfirmationsOptions;
 }
 
 const defaultWebhookDeps = (): WebhookDeps | null => {
@@ -43,7 +46,7 @@ export const createApp = (options: AppOptions = {}): Express => {
   );
 
   app.use(healthRouter);
-  app.use('/api/v1', createApiRouter(options.sql ?? db));
+  app.use('/api/v1', createApiRouter(options.sql ?? db, options.confirmations ? { confirmations: options.confirmations } : {}));
 
   app.use(notFound);
   app.use(errorHandler);

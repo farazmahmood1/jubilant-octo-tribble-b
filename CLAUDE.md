@@ -65,7 +65,8 @@ Admin GraphQL, version pinned in config (`2026-07`). Auth is the client credenti
 (`POST /admin/oauth/access_token`, `grant_type=client_credentials`), 24h token, cached.
 The token request REQUIRES `Accept: application/json` or Shopify returns HTML.
 Scopes granted: read_orders, read_fulfillments, read_products, read_inventory,
-read_locations, read_returns. Orders API returns the last 60 days by default.
+read_locations, read_returns. Changing order tags from the Confirmations page also needs
+write_orders (not granted as of 4 Oct 2026). Orders API returns the last 60 days by default.
 
 ## Read first
 

@@ -83,6 +83,26 @@ export class ShopifyClient {
     throw new ShopifyError(`Shopify ${this.store.key}: throttled after ${MAX_ATTEMPTS} attempts`);
   }
 
+  /**
+   * Adds and removes tags on one order, leaving its other tags alone. The only write the platform
+   * makes to Shopify; it needs the `write_orders` scope, which Shopify refuses without.
+   */
+  async setOrderTags(shopifyOrderId: string, add: readonly string[], remove: readonly string[]): Promise<void> {
+    if (add.length === 0 && remove.length === 0) return;
+    const parts = [
+      add.length > 0 ? 'added: tagsAdd(id: $id, tags: $add) { userErrors { field message } }' : '',
+      remove.length > 0 ? 'removed: tagsRemove(id: $id, tags: $remove) { userErrors { field message } }' : '',
+    ].filter(Boolean);
+    const query = `mutation OrderTags($id: ID!${add.length > 0 ? ', $add: [String!]!' : ''}${remove.length > 0 ? ', $remove: [String!]!' : ''}) { ${parts.join(' ')} }`;
+    const result = await this.graphql<Record<'added' | 'removed', { userErrors: Array<{ message: string }> } | undefined>>(query, {
+      id: `gid://shopify/Order/${shopifyOrderId}`,
+      ...(add.length > 0 ? { add } : {}),
+      ...(remove.length > 0 ? { remove } : {}),
+    });
+    const refused = [...(result.added?.userErrors ?? []), ...(result.removed?.userErrors ?? [])].map((e) => e.message);
+    if (refused.length > 0) throw new ShopifyError(`Shopify ${this.store.key}: ${refused.join('; ')}`);
+  }
+
   private async accessToken(): Promise<string> {
     if (this.store.accessToken) return this.store.accessToken;
     if (this.token && this.token.expiresAt - TOKEN_REFRESH_MARGIN_MS > Date.now()) return this.token.value;

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { AccountError, changeOwnPassword, finishTotpEnrolment, login, startTotpEnrolment } from '../../auth/accounts.js';
 import { ROLE_LABELS, ROLES_REQUIRING_TOTP, permissionsOf } from '../../auth/permissions.js';
-import { createSessionToken, sessionExpiresInSeconds } from '../../auth/session.js';
+import { type AuthUser, createSessionToken, sessionExpiresInSeconds } from '../../auth/session.js';
 import { logger } from '../../logger.js';
 import { HttpError } from '../middleware/errors.js';
 import { type SqlProvider, requireSql } from '../middleware/database.js';
@@ -25,6 +25,19 @@ const credentials = z.object({
 });
 const enable = z.object({ code: z.string().trim().min(1, 'Enter the code the app shows').max(16) });
 const newPassword = z.object({ current: z.string().max(200).optional(), next: z.string().min(1, 'Choose a password').max(200) });
+
+const screenKey = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'Not a list screen');
+const hiddenColumns = z.object({ hidden: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,39}$/)).max(40).transform((keys) => [...new Set(keys)]) });
+
+interface Preferences {
+  columns?: Record<string, string[]>;
+}
+
+/** A session still setting up its authenticator may do only that, here as everywhere else. */
+const laidOut = (user: AuthUser): AuthUser => {
+  if (!user.mfa) throw new HttpError(403, 'Set up your authenticator app to continue', undefined, 'totp_enrolment_required');
+  return user;
+};
 
 /** An account rule that was broken is the request's fault, not the server's. */
 const asHttp = (error: unknown): never => {
@@ -103,6 +116,27 @@ export const authRouter = (getSql: SqlProvider): Router => {
     const user = req.user!;
     const { recoveryCodes } = await finishTotpEnrolment(requireSql(getSql), user, code).catch(asHttp);
     res.json({ recoveryCodes, token: await createSessionToken(user, { mfa: true }), expiresIn: sessionExpiresInSeconds() });
+  });
+
+  /** The signed-in person's own layout choices: which columns each list hides. */
+  router.get('/auth/preferences', protect, async (req, res) => {
+    const user = laidOut(req.user!);
+    const [row] = await requireSql(getSql)<{ ui_preferences: Preferences }[]>`select ui_preferences from users where id = ${user.id}`;
+    res.json({ columns: row?.ui_preferences.columns ?? {} });
+  });
+
+  /** Replaces the hidden columns of one list, leaving every other list's as it was. */
+  router.put('/auth/preferences/columns/:screen', protect, async (req, res) => {
+    const user = laidOut(req.user!);
+    const screen = parse(screenKey, req.params['screen']);
+    const { hidden } = parse(hiddenColumns, req.body);
+    const sql = requireSql(getSql);
+    await sql`
+      update users
+      set ui_preferences = jsonb_set(ui_preferences, '{columns}', coalesce(ui_preferences->'columns', '{}'::jsonb) || jsonb_build_object(${screen}::text, ${sql.json(hidden)}::jsonb))
+      where id = ${user.id}
+    `;
+    res.json({ screen, hidden });
   });
 
   router.post('/auth/password', protect, async (req, res) => {

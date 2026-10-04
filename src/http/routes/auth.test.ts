@@ -93,7 +93,6 @@ describe('API: accounts, roles and the second factor', { skip: skipWithoutDb }, 
       ['GET', '/reports/dashboard', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
       ['GET', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
       ['PUT', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
-      ['GET', '/settings/confirmation-desk', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
       ['GET', '/pr/sends', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
       ['GET', '/influencers', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
       ['GET', '/orders/imports', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
@@ -460,6 +459,28 @@ describe('API: accounts, roles and the second factor', { skip: skipWithoutDb }, 
       const me = await call('GET', '/auth/me', { token: fresh.body['token'] });
       assert.equal(me.body['user'].role, 'accountant');
       assert.equal(stepOf(new Date()) > 0, true);
+    });
+  });
+
+  describe('the columns each person hides', () => {
+    it('keeps them with the account, per list, for every role, and keeps one person\'s apart from another\'s', async () => {
+      assert.deepEqual((await call('GET', '/auth/preferences', { token: as('agent') })).body, { columns: {} });
+      const saved = await call('PUT', '/auth/preferences/columns/orders', { token: as('agent'), body: { hidden: ['phone', 'items', 'phone'] } });
+      assert.equal(saved.status, 200);
+      await call('PUT', '/auth/preferences/columns/parcels', { token: as('agent'), body: { hidden: [] } });
+      await call('PUT', '/auth/preferences/columns/orders', { token: as('accountant'), body: { hidden: ['city'] } });
+      assert.deepEqual((await call('GET', '/auth/preferences', { token: as('agent') })).body, { columns: { orders: ['phone', 'items'], parcels: [] } });
+      assert.deepEqual((await call('GET', '/auth/preferences', { token: as('accountant') })).body, { columns: { orders: ['city'] } });
+    });
+
+    it('replaces a list\'s columns, and refuses what is not a list or a column', async () => {
+      await call('PUT', '/auth/preferences/columns/returns', { token: as('operations'), body: { hidden: ['a', 'b'] } });
+      await call('PUT', '/auth/preferences/columns/returns', { token: as('operations'), body: { hidden: ['c'] } });
+      assert.deepEqual((await call('GET', '/auth/preferences', { token: as('operations') })).body['columns'].returns, ['c']);
+      assert.equal((await call('PUT', '/auth/preferences/columns/Bad%20Screen', { token: as('operations'), body: { hidden: [] } })).status, 400);
+      assert.equal((await call('PUT', '/auth/preferences/columns/orders', { token: as('operations'), body: { hidden: ['<script>'] } })).status, 400);
+      assert.equal((await call('PUT', '/auth/preferences/columns/orders', { token: as('operations'), body: {} })).status, 400);
+      assert.equal((await call('GET', '/auth/preferences')).status, 401);
     });
   });
 });

@@ -5,6 +5,7 @@ import { explainDeliveredRevenue } from './delivered-revenue.js';
 import { explainDeliverySuccess } from './delivery-success.js';
 import type { ReportFilter } from './filter.js';
 import { explainGeneralLedger } from './general-ledger.js';
+import { explainOrderFunnel } from './order-funnel.js';
 import { explainPartnerLedger } from './partner-ledger.js';
 import { explainPnl } from './pnl.js';
 import { explainProfitPerParcel } from './profit-per-parcel.js';
@@ -24,9 +25,11 @@ export * from './delivery-success.js';
 export type { Rate, ReportFilter } from './filter.js';
 export * from './general-ledger.js';
 export * from './lines.js';
+export * from './order-funnel.js';
 export * from './partner-ledger.js';
 export * from './pnl.js';
 export * from './profit-per-parcel.js';
+export * from './recent-orders.js';
 export * from './return-rate.js';
 export * from './return-rate-by.js';
 export * from './trial-balance.js';
@@ -50,6 +53,7 @@ export const REPORT_PLANS: Record<string, ReportPlan> = {
   returnRate: { plan: explainReturnRate, needs: ['shipments_booked_idx'] },
   returnRateBy: { plan: explainReturnRateBy, needs: ['shipments_booked_idx'] },
   deliverySuccess: { plan: explainDeliverySuccess, needs: ['shipments_booked_idx'] },
+  orderFunnel: { plan: explainOrderFunnel, needs: ['orders_placed_idx'] },
   cashAwaitingPayout: { plan: explainCashAwaitingPayout, needs: ['journal_lines_account_idx', 'journal_entries_live_source_key'] },
   profitPerParcel: { plan: explainProfitPerParcel, needs: ['journal_entries_date_idx'] },
   productBreakdown: { plan: explainProductBreakdown, needs: ['journal_entries_date_idx', 'product_costs_lookup_idx'] },

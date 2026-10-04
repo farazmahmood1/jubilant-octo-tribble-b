@@ -10,16 +10,16 @@ import type { Logger } from '../logger.js';
 import { skipWithoutDb } from '../test/db.js';
 import { addEvent, orderWithLines, parcel, testUser, variantsIn } from '../test/inventory.js';
 import { type Stores, migratedWithStores } from '../test/stores.js';
-import { DeskError, agentPerformance, customerHistory, deskOrder, deskQueue, recordAttempt } from './confirmation-desk.js';
+import { customerHistory, deskOrder, deskQueue } from './confirmation-desk.js';
+import { type TagWriter, editOrderTags, orderTimeline } from './order-tags.js';
 
 /** Made-up numbers in the +92 300 000 xxxx range; nothing here is customer data. */
 const PHONE = '+923000000101';
 const OTHER_PHONE = '+923000000202';
 
-describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
+describe('Confirmations page', { skip: skipWithoutDb }, () => {
   let s: Stores;
   let agent: string;
-  let second: string;
   let account: string;
   let organicsAccount: string;
   let variant: string;
@@ -29,9 +29,7 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
   before(async () => {
     s = await migratedWithStores();
     agent = await testUser(s.schema.sql, 'agent.one@example.com');
-    second = await testUser(s.schema.sql, 'agent.two@example.com');
     await s.schema.sql`update users set name = 'Agent One' where id = ${agent}`;
-    await s.schema.sql`update users set name = 'Agent Two' where id = ${second}`;
     const [a] = await s.schema.sql<{ id: string }[]>`insert into postex_accounts (key, label, store_id) values ('nur', 'NUR', ${s.nur}) returning id`;
     const [b] = await s.schema.sql<{ id: string }[]>`insert into postex_accounts (key, label, store_id) values ('organics', 'Organics', ${s.organics}) returning id`;
     account = a!.id;
@@ -43,7 +41,7 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
     await s?.schema.drop();
   });
 
-  /** A new online order, with its confirmation created as the Shopify sync creates it. */
+  /** A new online order with the tags Shopify gave it, and its state recomputed as the sync does. */
   const newOrder = async (o: { store?: 'nur' | 'organics'; phone?: string; city?: string; placedAt?: Date; tags?: string[]; channel?: 'online' | 'pr' } = {}) => {
     const id = await orderWithLines(s.schema.sql, {
       storeId: o.store === 'organics' ? s.organics : s.nur,
@@ -58,96 +56,117 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
     await recomputeOrderState(s.schema.sql, id);
     return id;
   };
-  /** A parcel for an order, with history steps, and the order state recomputed as the sync does. */
   const book = async (orderId: string, events: Array<[string, string]> = [], organics = false) => {
     const id = await parcel(s.schema.sql, { accountId: organics ? organicsAccount : account, orderId, events });
     await recomputeOrderState(s.schema.sql, orderId);
     return id;
   };
-  const confirmation = async (orderId: string) =>
-    (await s.schema.sql<{ state: string; attempts: number; next_attempt_at: Date | null; source: string }[]>`
-      select state, attempts, next_attempt_at, source from confirmations where order_id = ${orderId}
-    `)[0]!;
+  const tagsOf = async (orderId: string) => (await s.schema.sql<{ tags: string[] }[]>`select tags from orders where id = ${orderId}`)[0]!.tags;
   const orderState = async (orderId: string) => (await s.schema.sql<{ state: string }[]>`select state from orders where id = ${orderId}`)[0]!.state;
-  const attempt = (orderId: string, outcome: Parameters<typeof recordAttempt>[1]['outcome'], at: string, extra: Partial<Parameters<typeof recordAttempt>[1]> = {}) =>
-    recordAttempt(s.schema.sql, { orderId, agentId: agent, channel: outcome === 'rescheduled' ? null : 'call', outcome, at: new Date(at), ...extra });
+  const confirmation = async (orderId: string) =>
+    (await s.schema.sql<{ state: string; source: string }[]>`select state, source from confirmations where order_id = ${orderId}`)[0]!;
 
-  it('NO ANSWER reschedules on a controllable clock; the third unanswered attempt escalates to unreachable', async () => {
-    const id = await newOrder({ phone: '+923000000301' });
-    assert.deepEqual(await confirmation(id), { state: 'pending', attempts: 0, next_attempt_at: new Date('2026-09-01T06:00:00Z'), source: 'none' });
+  /** A Shopify that records what it was asked, and can be told to refuse. */
+  const fakeShopify = () => {
+    const calls: Array<{ store: string; id: string; add: string[]; remove: string[] }> = [];
+    let refuse: string | null = null;
+    const write: TagWriter = async (store, id, add, remove) => {
+      if (refuse) throw new Error(refuse);
+      calls.push({ store, id, add, remove });
+    };
+    return { calls, write, refuseWith: (message: string | null) => void (refuse = message) };
+  };
 
-    const t0 = '2026-09-01T06:00:00Z';
-    const first = await attempt(id, 'no_answer', t0);
-    assert.deepEqual([first.confirmation.state, first.confirmation.attempts, first.orderState], ['no_answer', 1, 'placed']);
-    assert.equal((await confirmation(id)).next_attempt_at?.toISOString(), '2026-09-01T07:00:00.000Z');
+  it('the queue: NEW is every order not booked with no status tag; other apps\' tags do not count', async () => {
+    const fresh = await newOrder({ phone: '+923000000401' });
+    const marketing = await newOrder({ phone: '+923000000402', tags: ['Quoli Influenced Order', '⚠ Subscription Required'] });
+    const pending = await newOrder({ phone: '+923000000403', tags: ['⚠ Confirmation Pending'] });
+    const noAnswer = await newOrder({ phone: '+923000000404', tags: ['didnt answer the call'] });
+    const confirmed = await newOrder({ store: 'organics', phone: '+923000000405', tags: ['COD-Confirmed'] });
+    const postexTagged = await newOrder({ phone: '+923000000406', tags: ['PostEx', '✅ Order Confirmed'] });
+    const booked = await newOrder({ phone: '+923000000407' });
+    await book(booked);
+    const cancelledInShopify = await newOrder({ phone: '+923000000408' });
+    await s.schema.sql`update orders set cancelled_at = now() where id = ${cancelledInShopify}`;
 
-    // The queue's "due now" moves with the clock it is given.
-    const due = async (now: string) => (await deskQueue(s.schema.sql, { dueOnly: true, page: 1, pageSize: 50, now: new Date(now) })).rows.map((r) => r.orderId);
-    assert.ok(!(await due('2026-09-01T06:30:00Z')).includes(id), 'not due 30 minutes later');
-    assert.ok((await due('2026-09-01T07:01:00Z')).includes(id), 'due after an hour');
+    const ids = async (f: Partial<Parameters<typeof deskQueue>[1]>) =>
+      (await deskQueue(s.schema.sql, { view: 'new', page: 1, pageSize: 500, ...f })).rows.map((r) => r.orderId);
 
-    await attempt(id, 'no_answer', '2026-09-01T07:01:00Z');
-    assert.equal((await confirmation(id)).next_attempt_at?.toISOString(), '2026-09-01T10:01:00.000Z', 'then three hours');
-    const third = await attempt(id, 'no_answer', '2026-09-01T10:02:00Z');
-    assert.deepEqual([third.confirmation.state, third.confirmation.attempts, third.confirmation.nextAttemptAt], ['unreachable', 3, null]);
-    assert.deepEqual(await confirmation(id), { state: 'unreachable', attempts: 3, next_attempt_at: null, source: 'desk' });
-    assert.ok(!(await due('2026-09-09T00:00:00Z')).includes(id), 'out of the open queue');
-    const unreachable = await deskQueue(s.schema.sql, { states: ['unreachable'], page: 1, pageSize: 50, now: new Date('2026-09-02T00:00:00Z') });
-    assert.ok(unreachable.rows.some((r) => r.orderId === id && r.outcomeReason === 'No answer after 3 attempts'));
+    const fresh_ = await ids({});
+    assert.ok(fresh_.includes(fresh) && fresh_.includes(marketing), 'untagged, or tagged only by other apps');
+    for (const id of [pending, noAnswer, confirmed, postexTagged, booked, cancelledInShopify]) assert.ok(!fresh_.includes(id));
 
-    // A follow-up gives it one more try at the agent's time; it does not count as a contact.
-    const follow = await attempt(id, 'rescheduled', '2026-09-02T05:00:00Z', { followUpAt: new Date('2026-09-02T09:00:00Z') });
-    assert.deepEqual([follow.confirmation.state, follow.confirmation.attempts], ['no_answer', 3]);
+    const all = await ids({ view: 'all' });
+    assert.ok([fresh, marketing, pending, noAnswer, confirmed].every((id) => all.includes(id)));
+    assert.ok(![postexTagged, booked, cancelledInShopify].some((id) => all.includes(id)), 'booked (parcel or PostEx tag) or cancelled: gone');
+
+    assert.deepEqual(await ids({ view: 'all', tag: 'Didnt answer the call' }), [noAnswer], 'a tag filter, in any spelling');
+    assert.deepEqual(await ids({ view: 'all', store: 'organics' }), [confirmed]);
+
+    const row = (await deskQueue(s.schema.sql, { view: 'all', tag: 'didnt answer the call', page: 1, pageSize: 5 })).rows[0]!;
+    assert.deepEqual(row.tags, ['didnt answer the call']);
+    const page = await deskQueue(s.schema.sql, { view: 'all', page: 2, pageSize: 1 });
+    assert.equal(page.rows.length, 1);
+    assert.equal(page.total, all.length);
   });
 
-  it('a desk confirmation makes the order ready to book; a later cancellation cancels it; the order state follows', async () => {
-    const id = await newOrder({ phone: '+923000000302' });
-    const confirmed = await attempt(id, 'confirmed', '2026-09-01T06:10:00Z');
-    assert.deepEqual([confirmed.confirmation.state, confirmed.orderState], ['confirmed', 'ready_to_book']);
-    const cancelled = await attempt(id, 'cancelled', '2026-09-01T09:00:00Z', { reason: 'Ordered twice' });
-    assert.deepEqual([cancelled.confirmation.state, cancelled.orderState], ['cancelled', 'cancelled']);
-    const [log] = await s.schema.sql<{ n: number }[]>`select count(*)::int as n from order_state_log where order_id = ${id}`;
-    assert.ok(log!.n >= 3, 'placed, ready to book, cancelled: every transition logged');
-  });
+  it('TAGS: added and removed in Shopify first, then here, audited, and the order state follows', async () => {
+    const shopify = fakeShopify();
+    const id = await newOrder({ phone: '+923000000501', tags: ['⚠ Confirmation Pending', 'Quoli Influenced Order'] });
+    assert.equal(await orderState(id), 'placed');
 
-  it('EVERY OUTCOME is audited with the agent who recorded it', async () => {
-    const id = await newOrder({ phone: '+923000000303' });
-    await attempt(id, 'no_answer', '2026-09-01T06:00:00Z');
-    await attempt(id, 'callback', '2026-09-01T07:00:00Z', { followUpAt: new Date('2026-09-01T12:00:00Z'), agentId: second });
-    await attempt(id, 'rescheduled', '2026-09-01T08:00:00Z', { followUpAt: new Date('2026-09-01T13:00:00Z') });
-    await attempt(id, 'changed', '2026-09-01T12:05:00Z', { reason: 'One unit, not two', channel: 'whatsapp' });
-    const rows = await s.schema.sql<{ action: string; actor_id: string; after: Record<string, unknown> }[]>`
-      select action, actor_id, after from audit_log where entity = 'orders' and entity_id = ${id} order by id
+    const result = await editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['order confirmed'], remove: ['Confirmation Pending'], write: shopify.write });
+    assert.deepEqual([result.status, result.add, result.remove], ['written', ['✅ Order Confirmed'], ['⚠ Confirmation Pending']], 'Shopify\'s spelling, whatever was typed');
+    assert.equal(shopify.calls.length, 1);
+    assert.equal(shopify.calls[0]!.store, 'nur');
+    assert.deepEqual(await tagsOf(id), ['Quoli Influenced Order', '✅ Order Confirmed'], 'other apps\' tags untouched');
+    assert.deepEqual(await confirmation(id), { state: 'confirmed', source: 'shopify_tags' });
+    assert.equal(await orderState(id), 'ready_to_book');
+
+    const [audit] = await s.schema.sql<{ actor_id: string; after: Record<string, unknown> }[]>`
+      select actor_id::text, after from audit_log where action = 'shopify.tags' and entity_id = ${id}
     `;
+    assert.deepEqual([audit?.actor_id, audit?.after], [agent, { add: ['✅ Order Confirmed'], remove: ['⚠ Confirmation Pending'] }]);
+
+    const again = await editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['✅ Order Confirmed'], remove: [], write: shopify.write });
+    assert.equal(again.status, 'unchanged');
+    assert.equal(shopify.calls.length, 1, 'nothing to say: Shopify is not called');
+  });
+
+  it('TAGS: refuses what is not a status tag, and a Shopify refusal changes nothing here', async () => {
+    const shopify = fakeShopify();
+    const id = await newOrder({ phone: '+923000000502', tags: ['Loox - Review Request Email'] });
+    await assert.rejects(editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['VIP'], remove: [], write: shopify.write }), /not one of this store's status tags/);
+    await assert.rejects(editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: [], remove: ['Loox - Review Request Email'], write: shopify.write }), /not a status tag/);
+    await assert.rejects(editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['COD-Confirmed'], remove: [], write: shopify.write }), /not one of this store's/, 'an Organics tag on a NUR order');
+
+    shopify.refuseWith('Access denied for tagsAdd field. Required access: `write_orders`');
+    await assert.rejects(editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['number off'], remove: [], write: shopify.write }), /write_orders/);
+    assert.deepEqual(await tagsOf(id), ['Loox - Review Request Email']);
+    const [failed] = await s.schema.sql`select 1 from audit_log where action = 'shopify.tags.failed' and entity_id = ${id}`;
+    assert.ok(failed, 'the refusal is audited');
+
+    const pr = await newOrder({ phone: '+923000000503', channel: 'pr' });
+    await assert.rejects(editOrderTags(s.schema.sql, { orderId: pr, actorId: agent, add: ['by call'], remove: [], write: shopify.write }), /pr order/);
+  });
+
+  it('TIMELINE: Shopify\'s events, as text, with the tag changes made here, newest first', async () => {
+    const shopify = fakeShopify();
+    const id = await newOrder({ phone: '+923000000504' });
+    await editOrderTags(s.schema.sql, { orderId: id, actorId: agent, add: ['by call'], remove: [], write: shopify.write });
+    const timeline = await orderTimeline(s.schema.sql, id, [
+      { createdAt: '2026-09-01T06:00:00Z', action: 'placed', message: 'Customer placed this order on Online Store.', appTitle: null, attributeToApp: false },
+      { createdAt: '2026-09-01T06:01:00Z', action: 'tax_finalization_capture_started', message: 'Order#X tax', appTitle: null, attributeToApp: false },
+      { createdAt: '2026-09-01T09:00:00Z', action: 'note_created', message: 'PostEx added a note to <a href="https://x">#64670</a> &amp; more.', appTitle: 'PostEx', attributeToApp: true },
+    ]);
     assert.deepEqual(
-      rows.map((r) => [r.action, r.actor_id]),
-      [['confirmation.no_answer', agent], ['confirmation.callback', second], ['confirmation.rescheduled', agent], ['confirmation.changed', agent]],
+      timeline.map((e) => [e.source, e.who, e.text]),
+      [
+        ['platform', 'Agent One', 'Tags added by call'],
+        ['shopify', 'PostEx', 'PostEx added a note to #64670 & more.'],
+        ['shopify', null, 'Customer placed this order on Online Store.'],
+      ],
     );
-    assert.deepEqual([rows[3]!.after['state'], rows[3]!.after['reason'], rows[3]!.after['channel']], ['changed', 'One unit, not two', 'whatsapp']);
-    const attempts = await s.schema.sql<{ n: number }[]>`
-      select count(*)::int as n from confirmation_attempts a join confirmations c on c.id = a.confirmation_id where c.order_id = ${id}
-    `;
-    assert.equal(attempts[0]!.n, rows.length, 'one audit row per attempt');
-  });
-
-  it('refuses nonsense, writing nothing: a no-answer after a decision, a PR order, a Shopify-cancelled order, a cancellation without a reason', async () => {
-    const id = await newOrder({ phone: '+923000000304' });
-    await attempt(id, 'confirmed', '2026-09-01T06:00:00Z');
-    const before = (await s.schema.sql<{ n: number }[]>`select count(*)::int as n from audit_log`)[0]!.n;
-    await assert.rejects(attempt(id, 'no_answer', '2026-09-01T07:00:00Z'), /already decided \(confirmed\)/);
-    await assert.rejects(attempt(id, 'cancelled', '2026-09-01T07:00:00Z'), /Say why the customer cancelled/);
-    await assert.rejects(attempt(id, 'callback', '2026-09-01T07:00:00Z'), /needs a time/);
-    await assert.rejects(attempt(id, 'rescheduled', '2026-09-01T07:00:00Z', { followUpAt: new Date('2026-09-01T06:00:00Z') }), /must be in the future/);
-    await assert.rejects(attempt(id, 'cancelled', '2026-08-31T07:00:00Z', { reason: 'x' }), /before the order was placed/);
-    const pr = await newOrder({ channel: 'pr', phone: '+923000000305' });
-    await assert.rejects(attempt(pr, 'confirmed', '2026-09-01T07:00:00Z'), /pr order is not confirmed by the desk/);
-    const gone = await newOrder({ phone: '+923000000306' });
-    await s.schema.sql`update orders set cancelled_at = now() where id = ${gone}`;
-    await assert.rejects(attempt(gone, 'confirmed', '2026-09-01T07:00:00Z'), (e: unknown) => e instanceof DeskError && /cancelled in Shopify/.test(e.message));
-    await assert.rejects(attempt('999999', 'confirmed', '2026-09-01T07:00:00Z'), (e: unknown) => e instanceof DeskError && e.status === 404);
-    assert.equal((await s.schema.sql<{ n: number }[]>`select count(*)::int as n from audit_log`)[0]!.n, before);
-    const [noRow] = await s.schema.sql`select 1 from confirmations where order_id = ${pr}`;
-    assert.equal(noRow, undefined, 'PR orders have no confirmation');
   });
 
   it('HISTORY by phone_e164 across both brands: delivered vs refused, and the return rate of the city', async () => {
@@ -156,8 +175,7 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
     await book(delivered, [['0005', '2026-09-03T10:00:00Z']], true);
     const refused = await newOrder({ phone: PHONE, city: 'Multan' });
     await book(refused, [['0013', '2026-09-03T10:00:00Z'], ['0040', '2026-09-04T10:00:00Z'], ['0006', '2026-09-08T10:00:00Z']]);
-    const cancelled = await newOrder({ phone: PHONE, city: 'Multan' });
-    await attempt(cancelled, 'cancelled', '2026-09-01T07:00:00Z', { reason: 'Changed mind' });
+    await newOrder({ phone: PHONE, city: 'Multan', tags: ['❌ Order Canceled'] });
     const neighbour = await newOrder({ phone: OTHER_PHONE, city: ' multan ' });
     await book(neighbour, [['0005', '2026-09-03T10:00:00Z']]);
     const current = await newOrder({ phone: PHONE, city: 'Multan' });
@@ -174,128 +192,58 @@ describe('Confirmation Desk', { skip: skipWithoutDb }, () => {
     assert.equal(await customerHistory(s.schema.sql, '042-1234567'), null, 'a landline is not a key');
 
     const desk = (await deskOrder(s.schema.sql, current))!;
-    assert.equal(desk.phone, PHONE);
-    assert.match(String(desk.whatsappUrl), /^https:\/\/wa\.me\/923000000101\?text=/);
-    assert.match(decodeURIComponent(String(desk.whatsappUrl).split('text=')[1]!), /order #D\d+ from NUR by Juggun: 2 × Item 0\. Total Rs 2,500, cash on delivery to Multan/);
-    assert.equal(desk.callUrl, `tel:${PHONE}`);
-    const queued = (await deskQueue(s.schema.sql, { search: '0300 0000101', page: 1, pageSize: 50, now: new Date('2026-09-10T00:00:00Z') })).rows.find((r) => r.orderId === current)!;
+    assert.deepEqual([desk.phone, desk.whatsappUrl, desk.callUrl], [PHONE, 'https://wa.me/923000000101', `tel:${PHONE}`]);
+    assert.ok(desk.statusTags.includes('didnt answer the call') && !desk.statusTags.includes('COD-Confirmed'), 'NUR\'s own tags');
+    const queued = (await deskQueue(s.schema.sql, { view: 'new', search: '0300 0000101', page: 1, pageSize: 50 })).rows.find((r) => r.orderId === current)!;
     assert.deepEqual(queued.history, { delivered: 1, returned: 1 }, 'the queue row carries the same counts');
   });
 
-  it('the queue: open orders only, not booked, filtered by brand and search, paginated with a total', async () => {
-    const now = new Date('2026-09-10T00:00:00Z');
-    const a = await newOrder({ phone: '+923000000401' });
-    const b = await newOrder({ store: 'organics', phone: '+923000000402' });
-    const booked = await newOrder({ phone: '+923000000403' });
-    await book(booked);
-    const all = await deskQueue(s.schema.sql, { page: 1, pageSize: 500, now });
-    const ids = all.rows.map((r) => r.orderId);
-    assert.ok(ids.includes(a) && ids.includes(b));
-    assert.ok(!ids.includes(booked), 'a booked order is not the desk\'s any more');
-    assert.equal(all.total, all.rows.length);
-    const organics = await deskQueue(s.schema.sql, { store: 'organics', page: 1, pageSize: 500, now });
-    assert.ok(organics.rows.every((r) => r.store === 'organics') && organics.rows.some((r) => r.orderId === b));
-    const page = await deskQueue(s.schema.sql, { page: 2, pageSize: 1, now });
-    assert.equal(page.rows.length, 1);
-    assert.equal(page.total, all.total);
-    const [number] = await s.schema.sql<{ order_number: string }[]>`select order_number from orders where id = ${a}`;
-    assert.deepEqual((await deskQueue(s.schema.sql, { search: number!.order_number, page: 1, pageSize: 5, now })).rows.map((r) => r.orderId), [a]);
-  });
-
-  it('agent performance: contacts, decisions, the confirmation rate, speed to first contact and what their confirmations became', async () => {
-    const placed = new Date('2026-09-20T05:00:00Z');
-    const good = await newOrder({ phone: '+923000000501', placedAt: placed });
-    await attempt(good, 'confirmed', '2026-09-20T05:20:00Z', { agentId: second });
-    await book(good, [['0005', '2026-09-22T10:00:00Z']]);
-    const bad = await newOrder({ phone: '+923000000502', placedAt: placed });
-    await attempt(bad, 'no_answer', '2026-09-20T05:40:00Z', { agentId: second });
-    await attempt(bad, 'confirmed', '2026-09-20T07:00:00Z', { agentId: second });
-    await book(bad, [['0013', '2026-09-22T10:00:00Z'], ['0040', '2026-09-23T10:00:00Z']]);
-    const lost = await newOrder({ phone: '+923000000503', placedAt: placed });
-    await attempt(lost, 'cancelled', '2026-09-20T06:00:00Z', { agentId: second, reason: 'Too expensive' });
-
-    const [row] = (await agentPerformance(s.schema.sql, { from: '2026-09-20', to: '2026-09-20' })).filter((r) => r.agentId === second);
-    assert.deepEqual(
-      [row!.name, row!.contacts, row!.ordersWorked, row!.confirmed, row!.cancelled, row!.noAnswer],
-      ['Agent Two', 4, 3, 2, 1, 1],
-    );
-    assert.equal(row!.confirmationRate, 2 / 3);
-    // First contacts 20, 40 and 60 minutes after placing: the median is 40.
-    assert.equal(row!.medianMinutesToFirstContact, 40);
-    assert.deepEqual(row!.outcomes, { delivered: 1, returned: 1, returnRate: 0.5 });
-    assert.deepEqual(await agentPerformance(s.schema.sql, { from: '2026-09-21', to: '2026-09-21' }), [], 'nothing on a day with no attempts');
-  });
-
-  it('ALERTS: confirmed but not booked after 24 hours, cleared by booking; cancelled but booked, cleared when PostEx cancels', async () => {
-    const scan = (now: string) => scanReconciliation({ sql: s.schema.sql, logger, now: () => new Date(now) });
+  it('ALERTS from tags: confirmed but not booked after 24 hours, cleared by booking; cancelled but booked, cleared when PostEx cancels', async () => {
+    const scan = (now: Date) => scanReconciliation({ sql: s.schema.sql, logger, now: () => now });
+    const hours = (h: number) => new Date(Date.now() + h * 3_600_000);
     const open = async (kind: string, orderId: string) =>
-      (await s.schema.sql<{ id: string; detail: Record<string, unknown>; severity: string }[]>`
-        select id, detail, severity from reconciliation_items where kind = ${kind} and order_id = ${orderId} and status = 'open'
+      (await s.schema.sql<{ id: string; severity: string }[]>`
+        select id, severity from reconciliation_items where kind = ${kind} and order_id = ${orderId} and status = 'open'
       `)[0];
 
-    const waiting = await newOrder({ phone: '+923000000601', placedAt: new Date('2026-09-25T05:00:00Z') });
-    await attempt(waiting, 'confirmed', '2026-09-25T06:00:00Z');
-    await scan('2026-09-26T05:59:00Z');
-    assert.equal(await open('confirmed_not_booked', waiting), undefined, '23 hours 59 minutes: not yet');
-    await scan('2026-09-26T06:00:00Z');
-    const item = await open('confirmed_not_booked', waiting);
-    assert.deepEqual([item?.detail['hoursWaiting'], item?.detail['confirmedAt']], [24, '2026-09-25T06:00:00.000Z']);
-    await book(waiting);
-    await scan('2026-09-26T07:00:00Z');
-    assert.equal(await open('confirmed_not_booked', waiting), undefined, 'booking clears it');
-    const [closed] = await s.schema.sql`select status, resolved_by from reconciliation_items where kind = 'confirmed_not_booked' and order_id = ${waiting}`;
-    assert.deepEqual([closed?.['status'], closed?.['resolved_by']], ['resolved', null]);
+    // Confirmed by a tag: dated by when the system first saw the order confirmed.
+    const tagged = await newOrder({ phone: '+923000000603', placedAt: new Date(), tags: ['✅ Order Confirmed'] });
+    await scan(hours(23));
+    assert.equal(await open('confirmed_not_booked', tagged), undefined);
+    await scan(hours(25));
+    assert.ok(await open('confirmed_not_booked', tagged));
+    await book(tagged);
+    await scan(hours(26));
+    assert.equal(await open('confirmed_not_booked', tagged), undefined, 'booking clears it');
 
     // On hold in Shopify: deliberately not booked, so no alert.
-    const held = await newOrder({ phone: '+923000000602', placedAt: new Date('2026-09-25T05:00:00Z') });
+    const held = await newOrder({ phone: '+923000000602', placedAt: new Date(), tags: ['✅ Order Confirmed'] });
     await s.schema.sql`update orders set fulfillment_status = 'on_hold' where id = ${held}`;
-    await attempt(held, 'confirmed', '2026-09-25T06:00:00Z');
-    await scan('2026-09-27T06:00:00Z');
+    await recomputeOrderState(s.schema.sql, held);
+    await scan(hours(48));
     assert.equal(await open('confirmed_not_booked', held), undefined);
 
-    // Confirmed by a Shopify tag (S7): dated by when the system first saw the order confirmed.
-    const tagged = await newOrder({ phone: '+923000000603', placedAt: new Date(), tags: ['✅ Order Confirmed'] });
-    assert.equal((await confirmation(tagged)).source, 'shopify_tags');
-    await scan(new Date(Date.now() + 23 * 3_600_000).toISOString());
-    assert.equal(await open('confirmed_not_booked', tagged), undefined);
-    await scan(new Date(Date.now() + 25 * 3_600_000).toISOString());
-    assert.ok(await open('confirmed_not_booked', tagged));
-
-    // Cancelled at the desk after the parcel was booked.
-    const late = await newOrder({ phone: '+923000000604' });
-    await attempt(late, 'confirmed', '2026-09-01T06:00:00Z');
+    // Tagged cancelled after the parcel was booked.
+    const late = await newOrder({ phone: '+923000000604', tags: ['✅ Order Confirmed'] });
     const parcelId = await book(late, [['0008', '2026-09-02T10:00:00Z']]);
-    await attempt(late, 'cancelled', '2026-09-02T11:00:00Z', { reason: 'No longer needed' });
-    await scan('2026-09-02T12:00:00Z');
-    const cbb = await open('cancelled_but_booked', late);
-    assert.deepEqual([cbb?.detail['cancelledBy'], cbb?.severity], ['desk', 'warning']);
+    await editOrderTags(s.schema.sql, { orderId: late, actorId: agent, add: ['❌ Order Canceled'], remove: ['✅ Order Confirmed'], write: fakeShopify().write });
+    await scan(hours(1));
+    assert.equal((await open('cancelled_but_booked', late))?.severity, 'warning');
     await addEvent(s.schema.sql, parcelId, '0002', '2026-09-02T13:00:00Z');
-    await scan('2026-09-02T14:00:00Z');
+    await scan(hours(2));
     assert.equal(await open('cancelled_but_booked', late), undefined, 'cancelled in PostEx too: nothing left to do');
-
-    // Cancelled in Shopify, delivered anyway: an error.
-    const shopify = await newOrder({ phone: '+923000000605' });
-    await book(shopify, [['0005', '2026-09-03T10:00:00Z']]);
-    await s.schema.sql`update orders set cancelled_at = '2026-09-02T10:00:00Z' where id = ${shopify}`;
-    await scan('2026-09-04T00:00:00Z');
-    const delivered = await open('cancelled_but_booked', shopify);
-    assert.deepEqual([delivered?.detail['cancelledBy'], delivered?.severity], ['shopify', 'error']);
-
-    // Running the scan twice changes nothing.
-    const count = async () => (await s.schema.sql<{ n: number }[]>`select count(*)::int as n from reconciliation_items`)[0]!.n;
-    const before = await count();
-    await scan('2026-09-04T00:00:00Z');
-    assert.equal(await count(), before);
   });
 
-  it('GDPR redaction clears what agents typed, and leaves the attempts', async () => {
+  it('GDPR redaction still clears what agents typed on the old desk\'s attempts', async () => {
     const id = await newOrder({ phone: '+923000000701' });
-    await attempt(id, 'changed', '2026-09-01T06:00:00Z', { reason: 'New address: House 1, Street 2', note: 'Customer said deliver after 5pm' });
-    await assert.rejects(s.schema.sql`update confirmation_attempts set outcome = 'confirmed'`, /append-only/);
-    await assert.rejects(s.schema.sql`delete from confirmation_attempts`, /append-only/);
+    const [cf] = await s.schema.sql<{ id: string }[]>`select id from confirmations where order_id = ${id}`;
+    await s.schema.sql`
+      insert into confirmation_attempts (confirmation_id, agent_id, channel, at, outcome, reason, note)
+      values (${cf!.id}, ${agent}, 'call', '2026-09-01T07:00:00Z', 'changed', 'New address: House 1, Street 2', 'Deliver after 5pm')
+    `;
     await redactCustomer(s.schema.sql, s.nur, { shopifyCustomerId: null, phone: '+923000000701', shopifyOrderIds: [] });
     const [row] = await s.schema.sql<{ reason: string | null; note: string | null; outcome: string }[]>`
-      select a.reason, a.note, a.outcome from confirmation_attempts a join confirmations c on c.id = a.confirmation_id where c.order_id = ${id}
+      select reason, note, outcome from confirmation_attempts where confirmation_id = ${cf!.id}
     `;
     assert.deepEqual(row, { reason: null, note: null, outcome: 'changed' });
   });

@@ -4,7 +4,7 @@ import type { SqlProvider } from '../middleware/database.js';
 import { authenticate, authorize, stripPii } from '../middleware/require-auth.js';
 import { accountingRouter } from './accounting.js';
 import { authRouter } from './auth.js';
-import { confirmationsRouter } from './confirmations.js';
+import { type ConfirmationsOptions, confirmationsRouter } from './confirmations.js';
 import { consignmentRouter } from './consignment.js';
 import { healthRouter } from './health.js';
 import { influencersRouter } from './influencers.js';
@@ -20,7 +20,7 @@ import { settingsRouter } from './settings.js';
 import { stockRouter } from './stock.js';
 import { usersRouter } from './users.js';
 
-export const createApiRouter = (getSql: SqlProvider): Router => {
+export const createApiRouter = (getSql: SqlProvider, options: { confirmations?: ConfirmationsOptions } = {}): Router => {
   const apiRouter = Router();
 
   // Public: sign-in (and the signed-in person's own security, which checks its own session) and
@@ -39,7 +39,7 @@ export const createApiRouter = (getSql: SqlProvider): Router => {
   apiRouter.use(stockRouter(getSql));
   apiRouter.use(settingsRouter(getSql));
   apiRouter.use(accountingRouter(getSql));
-  apiRouter.use(confirmationsRouter(getSql));
+  apiRouter.use(confirmationsRouter(getSql, options.confirmations));
   apiRouter.use(influencersRouter(getSql));
   apiRouter.use(reportsRouter(getSql));
   apiRouter.use(purchasingRouter(getSql));

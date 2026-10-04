@@ -9,7 +9,9 @@ import {
   deliveredRevenue,
   deliverySuccess,
   netProfit,
+  orderFunnel,
   profitPerParcel,
+  recentOrders,
   returnRate,
   returnRateBy,
   drillBreakdown,
@@ -21,9 +23,10 @@ import {
   productBreakdown,
   trialBalanceReport,
 } from '../../reports/index.js';
+import { can } from '../../auth/permissions.js';
 import { todayInKarachi } from '../../reports/filter.js';
 import type { ReportFilter } from '../../reports/index.js';
-import { type SqlProvider, requireSql } from '../middleware/database.js';
+import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
 import { ID, parse } from '../validate.js';
 
@@ -127,6 +130,22 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
         profitPerParcel: { parcels: perParcel.parcels, total: perParcel.total, average: perParcel.average },
       }),
     );
+  });
+
+  /** How far the orders placed in the period got: placed, confirmed, booked, in transit, delivered, returned. */
+  router.get('/reports/funnel', async (req, res) => {
+    res.json(await orderFunnel(requireSql(getSql), filterOf(parse(filterQuery, req.query))));
+  });
+
+  /**
+   * The latest orders and what each made, for the dashboard. The period is not read: these are the
+   * newest, whenever they were placed. Customer names go only to roles that may see orders.
+   */
+  router.get('/reports/recent-orders', async (req, res) => {
+    const { role } = sessionUser(req);
+    const f = filterOf(parse(filterQuery, req.query));
+    const rows = await recentOrders(requireSql(getSql), f.store ? { store: f.store } : {}, { customers: can(role, 'orders.read') });
+    res.json({ rows });
   });
 
   /** Return rate by delivery city or by booking month, same definition as the headline rate. */

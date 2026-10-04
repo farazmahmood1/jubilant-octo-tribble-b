@@ -34,7 +34,7 @@ export const STAGE_SQL = `case s.status_code
  * Karachi days from booking to the outcome (the history's last step), or to now while it is
  * still out.
  */
-const DAYS_SQL = `case when s.booked_at is null then null else greatest(0,
+export const DAYS_SQL = `case when s.booked_at is null then null else greatest(0,
   ((case when s.status_code in ('0005', '0006', '0002')
          then coalesce((select max(e.occurred_at) from shipment_events e where e.shipment_id = s.id), s.status_updated_at, now())
          else now() end at time zone 'Asia/Karachi')::date

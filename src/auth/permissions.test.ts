@@ -75,6 +75,7 @@ describe('the route policy', () => {
 
   it('asks for the narrow permission before the broad one', () => {
     assert.deepEqual(permissionsFor('GET', '/reports/dashboard'), ['dashboard.read']);
+    assert.deepEqual(permissionsFor('GET', '/reports/funnel'), ['dashboard.read']);
     assert.deepEqual(permissionsFor('GET', '/reports/pnl'), ['reports.read']);
     assert.deepEqual(permissionsFor('POST', '/stock/adjustments'), ['stock.adjust']);
     assert.deepEqual(permissionsFor('GET', '/stock/quants'), ['stock.read']);
@@ -84,8 +85,8 @@ describe('the route policy', () => {
 
   it('treats reading and writing differently on the same path', () => {
     assert.deepEqual(permissionsFor('GET', '/settings/alerts'), ['settings.manage']);
-    assert.deepEqual(permissionsFor('GET', '/settings/confirmation-desk'), ['confirmations.work', 'settings.manage']);
-    assert.deepEqual(permissionsFor('PUT', '/settings/confirmation-desk'), ['settings.manage']);
+    assert.deepEqual(permissionsFor('GET', '/settings/matching'), ['settings.manage', 'reconciliation.read']);
+    assert.deepEqual(permissionsFor('PUT', '/settings/matching'), ['settings.manage']);
     assert.deepEqual(permissionsFor('GET', '/reconciliation/items'), ['reconciliation.read']);
     assert.deepEqual(permissionsFor('POST', '/reconciliation/items/4/resolve'), ['reconciliation.work']);
   });
@@ -100,9 +101,10 @@ describe('what each role may do, through the policy', () => {
   const ALLOWED: Array<[string, string, string[], string[]]> = [
     // [method, path, roles that may, roles that may not]
     ['GET', '/confirmations/queue', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
-    ['POST', '/confirmations/orders/1/attempts', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
+    ['PUT', '/confirmations/orders/1/tags', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
     ['GET', '/orders', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
     ['GET', '/orders/cities', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
+    ['GET', '/orders/12', ['owner', 'manager', 'operations', 'agent'], ['accountant']],
     ['GET', '/parcels', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
     ['POST', '/stock/returns/1/check-in', ['owner', 'manager', 'operations'], ['agent', 'accountant']],
     ['GET', '/reconciliation/items', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
@@ -117,6 +119,7 @@ describe('what each role may do, through the policy', () => {
     ['POST', '/accounting/periods/2026/8/close', ['owner', 'manager', 'accountant'], ['operations', 'agent']],
     ['GET', '/reports/pnl', ['owner', 'manager', 'accountant'], ['operations', 'agent']],
     ['GET', '/reports/dashboard', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
+    ['GET', '/reports/funnel', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
     ['GET', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
     ['PUT', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
     ['GET', '/users', ['owner'], ['manager', 'operations', 'agent', 'accountant']],

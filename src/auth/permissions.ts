@@ -108,7 +108,7 @@ export const ROUTE_POLICY: readonly Rule[] = [
   { path: /^\/users(\/|$)/, read: 'users.manage', write: 'users.manage' },
 
   // The dashboard's headline reads, ahead of the broader rules they would otherwise fall under.
-  { path: /^\/reports\/(dashboard|return-rate)$/, read: 'dashboard.read' },
+  { path: /^\/reports\/(dashboard|return-rate|funnel)$/, read: 'dashboard.read' },
   { path: /^\/reports\/breakdowns\/month$/, read: 'dashboard.read' },
   { path: /^\/reconciliation\/summary$/, read: ['reconciliation.read', 'dashboard.read'] },
   { path: /^\/stock\/returns-awaiting$/, read: ['returns.read', 'dashboard.read'] },
@@ -121,8 +121,6 @@ export const ROUTE_POLICY: readonly Rule[] = [
   { path: /^\/stock\/(adjustments|opening-from-shopify)$/, write: 'stock.adjust' },
   { path: /^\/stock\//, read: 'stock.read' },
 
-  // Settings: the desk's own settings are readable by the people who work the desk.
-  { path: /^\/settings\/confirmation-desk$/, read: ['confirmations.work', 'settings.manage'], write: 'settings.manage' },
   { path: /^\/settings\/matching$/, read: ['settings.manage', 'reconciliation.read'], write: 'settings.manage' },
   { path: /^\/settings\//, read: 'settings.manage', write: 'settings.manage' },
 
