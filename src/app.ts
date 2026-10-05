@@ -1,6 +1,6 @@
 import cors from 'cors';
 import express, { type Express } from 'express';
-import helmet from 'helmet';
+import helmetModule from 'helmet';
 import { pinoHttp } from 'pino-http';
 
 import { config } from './config.js';
@@ -22,7 +22,12 @@ export interface AppOptions {
   confirmations?: ConfirmationsOptions;
 }
 
-const defaultWebhookDeps = (): WebhookDeps | null => {
+// helmet ships no "types" export condition, so under NodeNext some installs (Vercel's) type the
+// default import as the CJS module object rather than the function. Unwrap `.default` when present.
+const helmet: typeof helmetModule =
+  (helmetModule as unknown as { default?: typeof helmetModule }).default ?? helmetModule;
+
+const defaultWebhookDeps =(): WebhookDeps | null => {
   const sql = db();
   if (!sql) return null;
   return { sql, logger, resolveStore: (shopDomain) => configuredWebhookStore(sql, shopDomain) };
