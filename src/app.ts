@@ -1,5 +1,5 @@
 import cors from 'cors';
-import express, { type Express } from 'express';
+import express, { type Express, type RequestHandler } from 'express';
 import helmetModule from 'helmet';
 import { pinoHttp } from 'pino-http';
 
@@ -24,8 +24,10 @@ export interface AppOptions {
 
 // helmet ships no "types" export condition, so under NodeNext some installs (Vercel's) type the
 // default import as the CJS module object rather than the function. Unwrap `.default` when present.
-const helmet: typeof helmetModule =
-  (helmetModule as unknown as { default?: typeof helmetModule }).default ?? helmetModule;
+// The explicit callable type matters: `typeof helmetModule` is the very type TS says has no call signatures.
+type HelmetFn = () => RequestHandler;
+const helmet: HelmetFn =
+  (helmetModule as unknown as { default?: HelmetFn }).default ?? (helmetModule as unknown as HelmetFn);
 
 const defaultWebhookDeps =(): WebhookDeps | null => {
   const sql = db();
