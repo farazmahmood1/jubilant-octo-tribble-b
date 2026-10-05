@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { atomically, type Db } from '../db/repos/upsert.js';
 import { type AuthUser, BOOTSTRAP_NAME, type SessionUser, type TokenClaims, matchesBootstrapCredentials } from './session.js';
-import { type Role, ROLES_REQUIRING_TOTP, isRole } from './permissions.js';
+import { type Role, ROLES_REQUIRING_TOTP, SECOND_FACTOR_ENFORCED, isRole } from './permissions.js';
 import { dummyHash, hashPassword, needsRehash, passwordProblem, verifyPassword } from './password.js';
 import { generateRecoveryCodes, generateSecret, hashRecoveryCode, looksLikeRecoveryCode, openSecret, otpauthUri, sealSecret, stepOf, verifyCode } from './totp.js';
 
@@ -145,7 +145,7 @@ export const login = async (db: Db, input: { email: string; password: string; co
     if (!user.is_active) return { ok: false, reason: 'invalid' };
 
     // The second factor, for anyone who has set one up.
-    const totpOn = user.totp_enabled_at !== null && user.totp_secret_enc !== null;
+    const totpOn = SECOND_FACTOR_ENFORCED && user.totp_enabled_at !== null && user.totp_secret_enc !== null;
     let lastStep: number | null = user.totp_last_step === null ? null : Number(user.totp_last_step);
     let recoveryHashes = user.totp_recovery_hashes;
     let usedRecoveryCode = false;

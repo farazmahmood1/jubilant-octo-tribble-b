@@ -87,8 +87,11 @@ export const permissionsOf = (role: Role): readonly Permission[] => ROLE_PERMISS
 export const can = (role: Role, permission: Permission): boolean => ROLE_PERMISSIONS[role].includes(permission);
 export const canAny = (role: Role, needed: readonly Permission[]): boolean => needed.some((p) => can(role, p));
 
+/** Switched off for now: sign-in is email and password only. Flip to true to bring the authenticator step back. */
+export const SECOND_FACTOR_ENFORCED = false;
+
 /** Roles that must sign in with a second factor. */
-export const ROLES_REQUIRING_TOTP: readonly Role[] = ['owner', 'manager'];
+export const ROLES_REQUIRING_TOTP: readonly Role[] = SECOND_FACTOR_ENFORCED ? ['owner', 'manager'] : [];
 
 // ---- Routes ----
 
