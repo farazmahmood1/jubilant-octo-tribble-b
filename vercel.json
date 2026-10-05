@@ -1,5 +1,6 @@
 {
   "framework": null,
+  "outputDirectory": "public",
   "functions": { "api/index.mjs": { "includeFiles": "dist/**" } },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index.mjs" }]
 }
