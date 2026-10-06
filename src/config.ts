@@ -30,6 +30,8 @@ const env: Record<string, string | undefined> = Object.fromEntries(
 );
 // Windows env lookups are case-insensitive, Linux ones are not; accept either spelling.
 env.DATABASE_URL = env.DATABASE_URL ?? env.database_url;
+// Vercel functions are always production, whatever NODE_ENV says or omits.
+if (env.VERCEL) env.NODE_ENV = 'production';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
