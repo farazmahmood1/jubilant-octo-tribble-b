@@ -410,3 +410,170 @@ export const returnsAwaitingCheckIn = async (db: Db, storeKey?: string): Promise
   `;
   return rows.map((r) => ({ shipmentId: r.id, trackingNumber: r.tracking_number, account: r.account, orderId: r.order_id, returnedAt: r.returned_at }));
 };
+
+// ---- Stock counts ----
+
+export interface CountLine {
+  variantId: string;
+  /** Units found on the shelf. */
+  counted: number;
+}
+
+export interface CountResult {
+  adjustmentId: string | null;
+  /** Products whose shelf differed from the ledger, and by how much in all. */
+  lines: number;
+  units: number;
+}
+
+/**
+ * A physical count of the warehouse, entered as what was found rather than as differences: each
+ * line's difference from the warehouse quant is worked out here, inside the transaction, so a
+ * parcel booked while the sheet was open cannot make the count wrong. Lines that agree move
+ * nothing. An opening count may be dated back to the cut-over day and is taken once per brand;
+ * after that a count is a `count`, true on the day it is recorded.
+ */
+export const recordCount = async (
+  sql: Sql,
+  input: { reason: 'opening_stock' | 'count'; at?: Date; note?: string; actorId: string; lines: readonly CountLine[] },
+): Promise<CountResult> =>
+  atomically(sql, async (tx) => {
+    if (input.lines.some((l) => !Number.isInteger(l.counted) || l.counted < 0)) throw new StockError('A counted quantity must be a whole number, zero or more');
+    if (new Set(input.lines.map((l) => l.variantId)).size !== input.lines.length) throw new StockError('A product appears twice on the count');
+    await tx`lock table stock_moves in share row exclusive mode`;
+    const warehouse = await locationId(tx, 'warehouse');
+    const ids = input.lines.map((l) => l.variantId);
+    const held = await tx<{ variant_id: string; qty: number; store: string }[]>`
+      select v.id as variant_id, coalesce(q.qty, 0)::int as qty, st.key as store
+      from variants v join stores st on st.id = v.store_id
+      left join stock_quants q on q.variant_id = v.id and q.location_id = ${warehouse}
+      where v.id = any(${ids}::bigint[])
+    `;
+    if (held.length !== ids.length) throw new StockError('A product on the count is not in the catalogue');
+    if (input.reason === 'opening_stock') {
+      const stores = [...new Set(held.map((h) => h.store))];
+      const [taken] = await tx<{ store: string }[]>`
+        select distinct st.key as store
+        from stock_adjustments a
+        join stock_moves m on m.ref_type = 'stock_adjustment' and m.ref_id = a.id::text
+        join variants v on v.id = m.variant_id join stores st on st.id = v.store_id
+        where a.reason = 'opening_stock' and st.key = any(${stores}::text[])
+        limit 1
+      `;
+      if (taken) throw new StockError(`The opening stock for ${taken.store === 'nur' ? 'NUR by Juggun' : "Juggun's Organics"} is already entered; record this as a stock count`);
+    }
+    const now = new Map(held.map((h) => [h.variant_id, h.qty]));
+    const deltas = input.lines.map((l) => ({ variantId: l.variantId, delta: l.counted - (now.get(l.variantId) ?? 0) })).filter((l) => l.delta !== 0);
+    if (deltas.length === 0) return { adjustmentId: null, lines: 0, units: 0 };
+    const adjustmentId = await recordAdjustment(tx as unknown as Sql, {
+      locationId: warehouse,
+      reason: input.reason,
+      ...(input.note ? { note: input.note } : {}),
+      actorId: input.actorId,
+      ...(input.at ? { at: input.at } : {}),
+      lines: deltas,
+    });
+    return { adjustmentId, lines: deltas.length, units: deltas.reduce((n, l) => n + l.delta, 0) };
+  });
+
+export interface CountSheetRow {
+  variantId: string;
+  store: string;
+  product: string;
+  variant: string;
+  sku: string | null;
+  /** What the ledger says is on the shelf now. */
+  warehouse: number;
+  inTransit: number;
+  returning: number;
+  /** Shopify's own figures, for reference; null when the variant has no Shopify stock record. */
+  shopifyOnHand: number | null;
+  shopifyAvailable: number | null;
+}
+
+/** Every product of a brand, with what the ledger holds where: the sheet a person counts against. */
+export const countSheet = async (db: Db, store?: 'nur' | 'organics'): Promise<CountSheetRow[]> => {
+  const rows = await db<
+    { variant_id: string; store: string; product: string; variant: string; sku: string | null; warehouse: number; in_transit: number; returning: number; on_hand: number | null; available: number | null }[]
+  >`
+    select v.id as variant_id, st.key as store, p.title as product, v.title as variant, v.sku,
+           coalesce(sum(q.qty) filter (where l.key = 'warehouse'), 0)::int as warehouse,
+           coalesce(sum(q.qty) filter (where l.key = 'in_transit'), 0)::int as in_transit,
+           coalesce(sum(q.qty) filter (where l.key = 'returning'), 0)::int as returning,
+           (select sum(sl.on_hand)::int from shopify_stock_levels sl where sl.variant_id = v.id) as on_hand,
+           (select sum(sl.available)::int from shopify_stock_levels sl where sl.variant_id = v.id) as available
+    from variants v
+    join products p on p.id = v.product_id
+    join stores st on st.id = v.store_id
+    left join stock_quants q on q.variant_id = v.id
+    left join locations l on l.id = q.location_id
+    where v.deleted_at is null ${store ? db`and st.key = ${store}` : db``}
+    group by v.id, st.key, p.title, v.title, v.sku
+    order by st.key, p.title, v.title
+  `;
+  return rows.map((r) => ({
+    variantId: r.variant_id,
+    store: r.store,
+    product: r.product,
+    variant: r.variant,
+    sku: r.sku,
+    warehouse: r.warehouse,
+    inTransit: r.in_transit,
+    returning: r.returning,
+    shopifyOnHand: r.on_hand,
+    shopifyAvailable: r.available,
+  }));
+};
+
+export interface StockHealth {
+  store: 'nur' | 'organics';
+  /** When the opening count was entered (the day it is dated), or null if it never was. */
+  openingCountAt: Date | null;
+  lastCountAt: Date | null;
+  /** Products whose shelf figure is below zero: sold before any count put them on the shelf. */
+  negativeProducts: number;
+  shelfUnits: number;
+  withPostex: number;
+  comingBack: number;
+  /** Returned by PostEx (0006) and not checked in. */
+  returnsWaiting: number;
+  /** Order lines whose product is not in the catalogue, so their units cannot move. */
+  unmappedLines: number;
+}
+
+/** Why each brand's shelf reads as it does: the facts the Inventory screen explains negatives with. */
+export const stockHealth = async (db: Db): Promise<StockHealth[]> => {
+  const rows = await db<
+    { store: 'nur' | 'organics'; opening_at: Date | null; last_count_at: Date | null; negative: number; shelf: number; postex: number; back: number; waiting: number; unmapped: number }[]
+  >`
+    select st.key as store,
+      (select max(a.at) from stock_adjustments a join stock_moves m on m.ref_type = 'stock_adjustment' and m.ref_id = a.id::text join variants v on v.id = m.variant_id
+        where a.reason = 'opening_stock' and v.store_id = st.id) as opening_at,
+      (select max(a.at) from stock_adjustments a join stock_moves m on m.ref_type = 'stock_adjustment' and m.ref_id = a.id::text join variants v on v.id = m.variant_id
+        where a.reason = 'count' and v.store_id = st.id) as last_count_at,
+      (select count(*)::int from stock_quants q join locations l on l.id = q.location_id join variants v on v.id = q.variant_id
+        where l.key = 'warehouse' and q.qty < 0 and v.store_id = st.id) as negative,
+      (select coalesce(sum(q.qty), 0)::int from stock_quants q join locations l on l.id = q.location_id join variants v on v.id = q.variant_id
+        where l.key = 'warehouse' and v.store_id = st.id) as shelf,
+      (select coalesce(sum(q.qty), 0)::int from stock_quants q join locations l on l.id = q.location_id join variants v on v.id = q.variant_id
+        where l.key = 'in_transit' and v.store_id = st.id) as postex,
+      (select coalesce(sum(q.qty), 0)::int from stock_quants q join locations l on l.id = q.location_id join variants v on v.id = q.variant_id
+        where l.key = 'returning' and v.store_id = st.id) as back,
+      (select count(*)::int from shipments s join postex_accounts a on a.id = s.postex_account_id
+        where a.store_id = st.id and s.status_code = '0006' and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)) as waiting,
+      (select count(*)::int from order_lines ol join orders o on o.id = ol.order_id
+        where o.store_id = st.id and ol.variant_id is null and ol.qty > 0 and exists (select 1 from shipments s where s.order_id = o.id)) as unmapped
+    from stores st order by st.key
+  `;
+  return rows.map((r) => ({
+    store: r.store,
+    openingCountAt: r.opening_at,
+    lastCountAt: r.last_count_at,
+    negativeProducts: r.negative,
+    shelfUnits: r.shelf,
+    withPostex: r.postex,
+    comingBack: r.back,
+    returnsWaiting: r.waiting,
+    unmappedLines: r.unmapped,
+  }));
+};

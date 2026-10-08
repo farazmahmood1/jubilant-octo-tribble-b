@@ -2,9 +2,12 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
+import { can } from '../../auth/permissions.js';
+import { damagedRegister } from '../../db/repos/damaged.js';
 import { postShipmentAccounting } from '../../domain/accounting.js';
+import { type ShopifyReturnsGateway, syncCheckInToShopify } from '../../domain/shopify-returns.js';
 import { openingStockFromShopify, shopifyStockComparison } from '../../domain/opening-stock.js';
-import { StockError, checkInReturn, recordAdjustment, returnsAwaitingCheckIn } from '../../domain/stock.js';
+import { StockError, checkInReturn, countSheet, recordAdjustment, recordCount, returnsAwaitingCheckIn, stockHealth } from '../../domain/stock.js';
 import { endOfKarachiDay } from '../../lib/time.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
@@ -38,6 +41,20 @@ const adjustment = z.object({
 });
 const storeQuery = z.object({ store: z.enum(['nur', 'organics']).optional() });
 const openingFromShopify = z.object({ asAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), store: z.enum(['nur', 'organics']).optional() });
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const damagedQuery = z.object({
+  store: z.enum(['nur', 'organics']).optional(),
+  from: z.string().regex(DAY).optional(),
+  to: z.string().regex(DAY).optional(),
+  q: z.string().trim().max(60).optional(),
+});
+const count = z.object({
+  reason: z.enum(['opening_stock', 'count']),
+  /** Opening stock only: the Karachi day the count was true. */
+  asAt: z.string().regex(DAY).optional(),
+  note: z.string().trim().max(2000).optional(),
+  lines: z.array(z.object({ variantId: z.string().regex(ID), counted: z.number().int().min(0).max(1_000_000) })).min(1).max(2000),
+});
 const variantsQuery = z.object({ search: z.string().trim().min(1).max(80), store: z.enum(['nur', 'organics']).optional() });
 
 const asAtDay = (day: string): Date => {
@@ -54,8 +71,20 @@ const asHttp = (error: unknown): never => {
   throw error;
 };
 
-export const stockRouter = (getSql: SqlProvider): Router => {
+export interface StockRouterOptions {
+  /** Shopify for return check-ins; tests pass a fake, the default calls the real stores. */
+  shopifyReturns?: ShopifyReturnsGateway;
+}
+
+export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {}): Router => {
   const router = Router();
+  const gateway = options.shopifyReturns;
+
+  /** The check-in of a parcel, if it has one. */
+  const checkInOf = async (shipmentId: string): Promise<string | null> => {
+    const [row] = await requireSql(getSql)<{ id: string }[]>`select id from return_check_ins where shipment_id = ${shipmentId}`;
+    return row?.id ?? null;
+  };
 
   router.get('/stock/returns-awaiting', async (req, res) => {
     const sql = requireSql(getSql);
@@ -67,10 +96,61 @@ export const stockRouter = (getSql: SqlProvider): Router => {
     const sql = requireSql(getSql);
     const { shipmentId } = parse(shipmentParams, req.params);
     const body = parse(checkIn, req.body);
-    const result = await checkInReturn(sql, shipmentId, body.outcome, await actorId(sql, sessionUser(req)), body.note).catch(asHttp);
+    const actor = await actorId(sql, sessionUser(req));
+    const result = await checkInReturn(sql, shipmentId, body.outcome, actor, body.note).catch(asHttp);
     // A damaged return is written off now rather than on the next sync.
     await postShipmentAccounting(sql, shipmentId);
+    // Then Shopify: the check-in stands whatever Shopify says, and the attempt is kept to retry.
+    const checkInId = await checkInOf(shipmentId);
+    const shopify = checkInId ? await syncCheckInToShopify(sql, { checkInId, actorId: actor, ...(gateway ? { gateway } : {}) }) : null;
+    res.json({ ...result, shopify });
+  });
+
+  /** Tries Shopify again for a check-in it refused or could not be reached for. */
+  router.post('/stock/returns/:shipmentId/shopify-sync', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { shipmentId } = parse(shipmentParams, req.params);
+    const checkInId = await checkInOf(shipmentId);
+    if (!checkInId) throw new HttpError(409, 'This parcel has not been checked in yet');
+    const shopify = await syncCheckInToShopify(sql, { checkInId, actorId: await actorId(sql, sessionUser(req)), force: true, ...(gateway ? { gateway } : {}) });
+    res.json({ shopify });
+  });
+
+  /** Every return checked in as damaged, with its items, dates and the cost written off. */
+  router.get('/stock/damaged', async (req, res) => {
+    const q = parse(damagedQuery, req.query);
+    const result = await damagedRegister(
+      requireSql(getSql),
+      { ...(q.store ? { store: q.store } : {}), ...(q.from ? { from: q.from } : {}), ...(q.to ? { to: q.to } : {}), ...(q.q ? { search: q.q } : {}) },
+      { phones: can(sessionUser(req).role, 'pii.phone') },
+    );
     res.json(result);
+  });
+
+  /** Per brand, why the shelf reads as it does: opening count, returns waiting, unmapped lines. */
+  router.get('/stock/health', async (_req, res) => {
+    res.json({ stores: await stockHealth(requireSql(getSql)) });
+  });
+
+  /** Every product of the brand with what the ledger holds, to count the shelf against. */
+  router.get('/stock/count-sheet', async (req, res) => {
+    const { store } = parse(storeQuery, req.query);
+    res.json({ rows: await countSheet(requireSql(getSql), store) });
+  });
+
+  /** A physical count, entered as what was found; the differences are worked out here. */
+  router.post('/stock/counts', async (req, res) => {
+    const sql = requireSql(getSql);
+    const body = parse(count, req.body);
+    if (body.asAt && body.reason !== 'opening_stock') throw new HttpError(400, 'asAt: only an opening count can be dated back');
+    const result = await recordCount(sql, {
+      reason: body.reason,
+      actorId: await actorId(sql, sessionUser(req)),
+      lines: body.lines,
+      ...(body.note ? { note: body.note } : {}),
+      ...(body.asAt ? { at: asAtDay(body.asAt) } : {}),
+    }).catch(asHttp);
+    res.status(result.adjustmentId ? 201 : 200).json(result);
   });
 
   router.get('/stock/locations', async (_req, res) => {

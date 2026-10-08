@@ -109,7 +109,7 @@ export const listPartners = async (db: Db): Promise<PartnerRow[]> => {
 export const partnerStock = async (db: Db, partnerId: string): Promise<Array<{ variantId: string; store: string; sku: string | null; title: string; qty: number }>> => {
   const location = await partnerLocation(db, partnerId);
   const rows = await db<{ variant_id: string; store: string; sku: string | null; title: string; qty: number }[]>`
-    select q.variant_id, st.key as store, v.sku, p.title || ' · ' || v.title as title, q.qty::int as qty
+    select q.variant_id, st.key as store, v.sku, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title, q.qty::int as qty
     from stock_quants q join variants v on v.id = q.variant_id join products p on p.id = v.product_id join stores st on st.id = v.store_id
     where q.location_id = ${location.id} and q.qty <> 0
     order by st.key, p.title, v.title

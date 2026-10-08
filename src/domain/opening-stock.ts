@@ -61,7 +61,7 @@ export const shopifyStockComparison = async (db: Db, storeKey?: string): Promise
     warehouse as (
       select q.variant_id, q.qty::int as qty from stock_quants q join locations loc on loc.id = q.location_id where loc.key = 'warehouse'
     )
-    select v.id as variant_id, st.key as store, v.sku, p.title || ' · ' || v.title as title,
+    select v.id as variant_id, st.key as store, v.sku, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title,
            lv.on_hand, lv.available, lv.committed, coalesce(u.qty, 0) as unbooked, coalesce(w.qty, 0) as warehouse, lv.read_at
     from levels lv
     join variants v on v.id = lv.variant_id

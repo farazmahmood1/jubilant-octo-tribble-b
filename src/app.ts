@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { type Sql, db } from './db.js';
 import { errorHandler, notFound } from './http/middleware/errors.js';
 import type { ConfirmationsOptions } from './http/routes/confirmations.js';
+import type { StockRouterOptions } from './http/routes/stock.js';
 import { createApiRouter } from './http/routes/index.js';
 import { healthRouter } from './http/routes/health.js';
 import { shopifyWebhookRouter } from './http/routes/shopify-webhooks.js';
@@ -20,6 +21,8 @@ export interface AppOptions {
   sql?: () => Sql | null | undefined;
   /** Overrides how the Confirmations page reaches Shopify; tests pass a fake one. */
   confirmations?: ConfirmationsOptions;
+  /** Overrides how return check-ins reach Shopify; tests pass a fake one. */
+  stock?: StockRouterOptions;
 }
 
 // helmet ships no "types" export condition, so under NodeNext some installs (Vercel's) type the
@@ -53,7 +56,7 @@ export const createApp = (options: AppOptions = {}): Express => {
   );
 
   app.use(healthRouter);
-  app.use('/api/v1', createApiRouter(options.sql ?? db, options.confirmations ? { confirmations: options.confirmations } : {}));
+  app.use('/api/v1', createApiRouter(options.sql ?? db, { ...(options.confirmations ? { confirmations: options.confirmations } : {}), ...(options.stock ? { stock: options.stock } : {}) }));
 
   app.use(notFound);
   app.use(errorHandler);

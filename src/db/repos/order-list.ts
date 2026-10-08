@@ -24,6 +24,8 @@ export interface OrderFilter {
   channels?: OrderChannel[];
   flags?: OrderFlag[];
   cities?: string[];
+  /** Carrying any of these Shopify tags, matched without regard to case or spacing. */
+  tags?: string[];
   /** Placed on these Karachi days, inclusive. */
   from?: string | null;
   to?: string | null;
@@ -46,6 +48,8 @@ export interface OrderListRow {
   channel: OrderChannel;
   items: number;
   discountCodes: string[];
+  /** The order's Shopify tags, as Shopify spells them. */
+  tags: string[];
   parcels: number;
   /** The newest parcel booked for the order, if any. */
   parcel: { id: string; trackingNumber: string; stage: Stage } | null;
@@ -72,6 +76,7 @@ const conditions = (db: Db, f: OrderFilter) => {
     ${f.stores?.length ? db`and st.key = any(${f.stores}::text[])` : db``}
     ${f.channels?.length ? db`and o.channel = any(${f.channels}::text[])` : db``}
     ${f.cities?.length ? db`and lower(trim(ad.city)) = any(${f.cities.map((c) => c.trim().toLowerCase())}::text[])` : db``}
+    ${f.tags?.length ? db`and exists (select 1 from unnest(o.tags) t where lower(trim(t)) = any(${f.tags.map((t) => t.trim().toLowerCase())}::text[]))` : db``}
     ${f.from ? db`and o.placed_at >= ${startOfKarachiDate(f.from)}` : db``}
     ${f.to ? db`and o.placed_at <= ${endOfKarachiDay(f.to)}` : db``}
     ${flag('no_parcel') ? db`and not exists (select 1 from shipments s where s.order_id = o.id)` : db``}
@@ -84,11 +89,11 @@ export const listOrders = async (db: Db, f: OrderFilter): Promise<{ rows: OrderL
   const sort = f.sort ?? { key: 'placedAt', dir: 'desc' };
   const rows = await db<{
     id: string; order_number: string; store: 'nur' | 'organics' | null; placed_at: Date; customer_name: string | null; phone: string | null; city: string | null;
-    total: string; state: OrderState | null; financial_status: string | null; channel: OrderChannel; items: number; discount_codes: string[]; parcels: number;
+    total: string; state: OrderState | null; financial_status: string | null; channel: OrderChannel; items: number; discount_codes: string[]; tags: string[]; parcels: number;
     parcel_id: string | null; tracking_number: string | null; parcel_stage: Stage | null;
   }[]>`
     select o.id, o.order_number, st.key as store, o.placed_at, c.name as customer_name, c.phone_e164 as phone, ad.city,
-           o.total_paisa::text as total, o.state, o.financial_status, o.channel, o.discount_codes,
+           o.total_paisa::text as total, o.state, o.financial_status, o.channel, o.discount_codes, o.tags,
            (select coalesce(sum(l.qty), 0)::int from order_lines l where l.order_id = o.id) as items,
            (select count(*)::int from shipments s where s.order_id = o.id) as parcels,
            p.id as parcel_id, p.tracking_number, p.stage as parcel_stage
@@ -128,6 +133,7 @@ export const listOrders = async (db: Db, f: OrderFilter): Promise<{ rows: OrderL
       channel: r.channel,
       items: r.items,
       discountCodes: r.discount_codes,
+      tags: r.tags,
       parcels: r.parcels,
       parcel: r.parcel_id && r.tracking_number && r.parcel_stage ? { id: r.parcel_id, trackingNumber: r.tracking_number, stage: r.parcel_stage } : null,
     })),
@@ -141,6 +147,17 @@ export const orderCities = async (db: Db): Promise<Array<{ city: string; orders:
     from orders o join addresses ad on ad.id = o.shipping_address_id
     where ad.city is not null and trim(ad.city) <> ''
     group by lower(trim(ad.city)) order by count(*) desc, 1 limit 100
+  `;
+  return [...rows];
+};
+
+/** Every Shopify tag on stored orders, most orders first, for the tag filter. */
+export const orderTags = async (db: Db): Promise<Array<{ tag: string; orders: number }>> => {
+  const rows = await db<{ tag: string; orders: number }[]>`
+    select min(trim(t)) as tag, count(distinct o.id)::int as orders
+    from orders o cross join lateral unnest(o.tags) t
+    where trim(t) <> ''
+    group by lower(trim(t)) order by count(distinct o.id) desc, 1 limit 200
   `;
   return [...rows];
 };

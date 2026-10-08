@@ -46,8 +46,38 @@ export const DEFAULT_ALERT_THRESHOLDS: AlertThresholds = {
 const tagList = z.array(z.string().trim().min(1).max(80)).max(30);
 const confirmationTags = z.object({ confirmed: tagList, cancelled: tagList, pending: tagList, noAnswer: tagList, unreachable: tagList });
 
+/**
+ * `app_settings` key `shopify`: whether a return check-in is carried to Shopify (cancel the open
+ * order with its items restocked, or put the units back on a fulfilled one). On unless switched off.
+ */
+const shopifySetting = z.object({ returnsWriteback: z.boolean() });
+
 export const settingsRouter = (getSql: SqlProvider): Router => {
   const router = Router();
+
+  router.get('/settings/shopify', async (_req, res) => {
+    const sql = requireSql(getSql);
+    const [row] = await sql<{ value: { returnsWriteback?: boolean } }[]>`select value from app_settings where key = 'shopify'`;
+    res.json({ shopify: { returnsWriteback: row?.value.returnsWriteback !== false } });
+  });
+
+  router.put('/settings/shopify', async (req, res) => {
+    const sql = requireSql(getSql);
+    const value = parse(shopifySetting, req.body);
+    const actor = await actorId(sql, sessionUser(req));
+    await atomically(sql, async (tx) => {
+      const [before] = await tx<{ value: unknown }[]>`select value from app_settings where key = 'shopify' for update`;
+      await tx`
+        insert into app_settings (key, value) values ('shopify', ${tx.json(value)})
+        on conflict (key) do update set value = excluded.value
+      `;
+      await tx`
+        insert into audit_log (actor_id, action, entity, entity_id, before, after)
+        values (${actor}, 'settings.update', 'app_settings', 'shopify', ${before ? tx.json(before.value as never) : null}, ${tx.json(value)})
+      `;
+    });
+    res.json({ shopify: value });
+  });
 
   router.get('/settings/matching', async (_req, res) => {
     const sql = requireSql(getSql);

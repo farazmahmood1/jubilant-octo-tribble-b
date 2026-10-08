@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 import { can } from '../../auth/permissions.js';
 import { orderDetail } from '../../db/repos/order-detail.js';
-import { ORDER_CHANNELS, ORDER_FLAGS, ORDER_SORTS, ORDER_STATES, listOrders, orderCities } from '../../db/repos/order-list.js';
+import { STATUS_TAGS } from '../../domain/order-tags.js';
+import { ORDER_CHANNELS, ORDER_FLAGS, ORDER_SORTS, ORDER_STATES, listOrders, orderCities, orderTags } from '../../db/repos/order-list.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
 import { ID, parse } from '../validate.js';
@@ -32,6 +33,10 @@ const listQuery = z.object({
     .string()
     .optional()
     .transform((v) => (v ? v.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20) : [])),
+  tag: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20) : [])),
   from: z.string().regex(DAY).optional(),
   to: z.string().regex(DAY).optional(),
   sort: z
@@ -57,6 +62,7 @@ export const ordersRouter = (getSql: SqlProvider): Router => {
       channels: q.channel,
       flags: q.flag,
       cities: q.city,
+      tags: q.tag,
       from: q.from ?? null,
       to: q.to ?? null,
       sort: q.sort,
@@ -68,6 +74,11 @@ export const ordersRouter = (getSql: SqlProvider): Router => {
 
   router.get('/orders/cities', async (_req, res) => {
     res.json({ cities: await orderCities(requireSql(getSql)) });
+  });
+
+  router.get('/orders/tags', async (_req, res) => {
+    // The status vocabulary too, so the screen colours a decision the way the Confirmations page does.
+    res.json({ tags: await orderTags(requireSql(getSql)), statusTags: STATUS_TAGS });
   });
 
   /**

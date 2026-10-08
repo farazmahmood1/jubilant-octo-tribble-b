@@ -147,11 +147,14 @@ export const listReviewItems = async (db: Db, filter: ReviewItemFilter): Promise
     {
       id: string; kind: string; severity: ReviewItemView['severity']; status: ReviewItemView['status']; store_key: string | null;
       order_id: string | null; order_number: string | null; shipment_id: string | null; tracking_number: string | null;
-      detail: Record<string, unknown>; note: string | null; resolved_by: string | null; created_at: Date; resolved_at: Date | null;
+      detail: Record<string, unknown>; note: string | null; resolved_by: string | null; created_at: Date; resolved_at: Date | null; product: string | null;
     }[]
   >`
     select r.id, r.kind, r.severity, r.status, st.key as store_key, r.order_id, o.order_number, r.shipment_id, sh.tracking_number,
-           r.detail, r.note, u.email as resolved_by, r.created_at, r.resolved_at
+           r.detail, r.note, u.email as resolved_by, r.created_at, r.resolved_at,
+           -- An item about a product names it, so a person need not look the id up.
+           (select p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end
+              from variants v join products p on p.id = v.product_id where v.id::text = r.detail->>'variantId') as product
     from reconciliation_items r
     left join stores st on st.id = r.store_id
     left join orders o on o.id = r.order_id
@@ -175,7 +178,7 @@ export const listReviewItems = async (db: Db, filter: ReviewItemFilter): Promise
     orderNumber: r.order_number,
     shipmentId: r.shipment_id,
     trackingNumber: r.tracking_number,
-    detail: r.detail,
+    detail: r.product ? { ...r.detail, product: r.product } : r.detail,
     note: r.note,
     resolvedBy: r.resolved_by,
     createdAt: r.created_at,

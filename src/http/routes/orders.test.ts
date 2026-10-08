@@ -35,7 +35,7 @@ describe('API: orders', { skip: skipWithoutDb }, () => {
     id['organics'] = await orderWithLines(s.schema.sql, { storeId: s.organics, number: '#O200', placedAt: new Date('2026-09-05T05:00:00Z'), channel: 'pr', lines });
     await s.schema.sql`update customers set name = 'Test Customer' where phone_e164 = '+923000000111'`;
     await s.schema.sql`update orders set state = 'delivered', discount_codes = '{SAVE10}' where id = ${id['delivered']!}`;
-    await s.schema.sql`update orders set state = 'placed' where id = ${id['plain']!}`;
+    await s.schema.sql`update orders set state = 'placed', tags = '{"✅ Order Confirmed",PostEx}' where id = ${id['plain']!}`;
     const first = await parcel(s.schema.sql, { accountId: account!.id, orderId: id['delivered']!, events: [['0013', '2026-09-02T09:00:00Z']], bookedAt: new Date('2026-09-01T10:00:00Z') });
     id['second'] = await parcel(s.schema.sql, { accountId: account!.id, orderId: id['delivered']!, events: [['0005', '2026-09-04T12:00:00Z']], bookedAt: new Date('2026-09-02T10:00:00Z') });
     assert.ok(first);
@@ -86,5 +86,14 @@ describe('API: orders', { skip: skipWithoutDb }, () => {
     assert.equal((await get('/orders?state=lost')).status, 400);
     const cities = (await get('/orders/cities')).body['cities'] as Array<{ city: string; orders: number }>;
     assert.equal(cities.length, 2);
+  });
+
+  it('shows each order its Shopify tags and filters by them, any case', async () => {
+    const plain = (await rows('')).rows.find((r) => r['id'] === id['plain'])!;
+    assert.deepEqual(plain['tags'], ['✅ Order Confirmed', 'PostEx']);
+    assert.deepEqual(await ids('tag=postex'), [id['plain']]);
+    assert.deepEqual(await ids('tag=nothing'), []);
+    const tags = (await get('/orders/tags')).body['tags'] as Array<{ tag: string; orders: number }>;
+    assert.deepEqual(tags.map((t) => [t.tag, t.orders]).sort(), [['PostEx', 1], ['✅ Order Confirmed', 1]].sort());
   });
 });

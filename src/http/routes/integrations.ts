@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import { config, isShopifyStoreReady } from '../../config.js';
 import { postexClient } from '../../integrations/postex/client.js';
+import { allShopifyAccess } from '../../integrations/shopify/access.js';
 import { shopifyClient } from '../../integrations/shopify/client.js';
 
 export const integrationsRouter: Router = Router();
@@ -27,6 +28,16 @@ integrationsRouter.get('/integrations/status', (_req, res) => {
       accounts: config.postex.accounts.map((account) => ({ key: account.key, label: account.label, configured: true })),
     },
   });
+});
+
+/**
+ * What Shopify has granted each store's app, and so whether tag changes and return check-ins can
+ * be written there. Read from Shopify (cached for a few minutes); `refresh=true` asks again, for
+ * right after the owner has approved a new scope.
+ */
+integrationsRouter.get('/integrations/shopify-access', async (req, res) => {
+  const stores = await allShopifyAccess({ fresh: req.query['refresh'] === 'true' });
+  res.json({ stores: stores.map((s) => ({ ...s, checkedAt: s.checkedAt.toISOString() })) });
 });
 
 export interface ConnectionHealth {

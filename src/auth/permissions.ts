@@ -116,19 +116,24 @@ export const ROUTE_POLICY: readonly Rule[] = [
   { path: /^\/reconciliation\/summary$/, read: ['reconciliation.read', 'dashboard.read'] },
   { path: /^\/stock\/returns-awaiting$/, read: ['returns.read', 'dashboard.read'] },
   { path: /^\/integrations\/status$/, read: ['integrations.read', 'dashboard.read'] },
+  // Whether Shopify lets the platform write: the Confirmations and Returns screens warn when not.
+  { path: /^\/integrations\/shopify-access$/, read: ['integrations.read', 'confirmations.work', 'returns.read'] },
 
   { path: /^\/integrations\//, read: 'integrations.read' },
   { path: /^\/reconciliation\//, read: 'reconciliation.read', write: 'reconciliation.work' },
 
   { path: /^\/stock\/returns\//, write: 'returns.checkin' },
-  { path: /^\/stock\/(adjustments|opening-from-shopify)$/, write: 'stock.adjust' },
+  { path: /^\/stock\/damaged$/, read: ['returns.read', 'stock.read'] },
+  { path: /^\/stock\/(adjustments|opening-from-shopify|counts)$/, write: 'stock.adjust' },
   { path: /^\/stock\//, read: 'stock.read' },
 
   { path: /^\/settings\/matching$/, read: ['settings.manage', 'reconciliation.read'], write: 'settings.manage' },
+  { path: /^\/settings\/shopify$/, read: ['settings.manage', 'returns.read'], write: 'settings.manage' },
   { path: /^\/settings\//, read: 'settings.manage', write: 'settings.manage' },
 
   { path: /^\/accounting\/periods\/\d+\/\d+\/close$/, write: 'accounting.close' },
   { path: /^\/accounting\/opening-balances$/, read: 'accounting.read', write: 'accounting.close' },
+  { path: /^\/accounting\/expenses(\/|$)/, read: 'accounting.read', write: 'accounting.close' },
   { path: /^\/accounting\//, read: 'accounting.read' },
 
   { path: /^\/confirmations\//, read: 'confirmations.work', write: 'confirmations.work' },

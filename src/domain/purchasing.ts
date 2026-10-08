@@ -306,7 +306,7 @@ export const listRequests = async (db: Db, opts: { includeClosed?: boolean } = {
     id: string; variant_id: string; store: string; sku: string | null; title: string; qty: number; reason: string | null; requested_by: string;
     requested_at: Date; cancelled: boolean; ordered: boolean; quotes: number;
   }[]>`
-    select r.id, r.variant_id, st.key as store, v.sku, p.title || ' · ' || v.title as title, r.qty, r.reason, u.name as requested_by, r.requested_at,
+    select r.id, r.variant_id, st.key as store, v.sku, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title, r.qty, r.reason, u.name as requested_by, r.requested_at,
            r.cancelled_at is not null as cancelled,
            exists (select 1 from po_lines pl join purchase_orders po on po.id = pl.po_id where pl.purchase_request_id = r.id and po.cancelled_at is null) as ordered,
            (select count(*)::int from quotation_lines ql where ql.purchase_request_id = r.id) as quotes
@@ -441,6 +441,23 @@ export const createPurchaseOrder = async (db: Db, input: PurchaseOrderInput): Pr
       if (!variant) throw new PurchaseError(`Product ${line.variantId} not found`, 404);
       if (variant.store_id !== store.id) throw new PurchaseError(`Product ${line.variantId} is another brand's: one order per brand`);
     }
+    // A line that answers a request must be for that request's product, and the request still open.
+    const requestIds = lines.flatMap((l) => (l.requestId ? [l.requestId] : []));
+    if (requestIds.length > 0) {
+      const requests = await tx<{ id: string; variant_id: string; cancelled: boolean; ordered: boolean }[]>`
+        select r.id, r.variant_id, r.cancelled_at is not null as cancelled,
+               exists (select 1 from po_lines pl join purchase_orders o on o.id = pl.po_id where pl.purchase_request_id = r.id and o.cancelled_at is null) as ordered
+        from purchase_requests r where r.id = any(${requestIds}::bigint[])
+      `;
+      for (const line of lines) {
+        if (!line.requestId) continue;
+        const request = requests.find((r) => r.id === line.requestId);
+        if (!request) throw new PurchaseError(`Request ${line.requestId} not found`, 404);
+        if (request.variant_id !== line.variantId) throw new PurchaseError(`Request ${line.requestId} is for another product`);
+        if (request.cancelled) throw new PurchaseError(`Request ${line.requestId} was cancelled`);
+        if (request.ordered) throw new PurchaseError(`Request ${line.requestId} is already on an order`);
+      }
+    }
     const [po] = await tx<{ id: string; number: string }[]>`
       insert into purchase_orders (vendor_id, store_id, quotation_id, ordered_on, expected_on, note, created_by)
       values (${input.vendorId}, ${store.id}, ${input.quotationId ?? null}, ${input.orderedOn}, ${input.expectedOn ?? null}, ${input.note ?? null}, ${input.actorId})
@@ -498,7 +515,7 @@ interface LineFacts {
 
 const lineFacts = (db: Db, poId: string) =>
   db<LineFacts[]>`
-    select pl.id, pl.variant_id, v.sku, p.title || ' · ' || v.title as title, pl.qty, pl.unit_cost_paisa::text as unit_cost,
+    select pl.id, pl.variant_id, v.sku, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title, pl.qty, pl.unit_cost_paisa::text as unit_cost,
            coalesce((select sum(g.qty) from gr_lines g where g.po_line_id = pl.id), 0)::int as received,
            coalesce((select sum(b.qty) from bill_lines b where b.po_line_id = pl.id), 0)::int as billed_qty,
            coalesce((select sum(b.qty * b.unit_price_paisa) from bill_lines b where b.po_line_id = pl.id), 0)::text as billed_value
@@ -575,7 +592,7 @@ export interface PurchaseOrderDetail extends PurchaseOrderSummary {
 /** A bill's lines as the match sees them, with every other bill on the same order lines. */
 const billMatchLines = async (db: Db, billId: string): Promise<MatchLine[]> => {
   const rows = await db<{ po_line_id: string; title: string; unit_cost: string; received: number; billed_qty: number; billed_value: string; qty: number; value: string }[]>`
-    select b.po_line_id, p.title || ' · ' || v.title as title, pl.unit_cost_paisa::text as unit_cost,
+    select b.po_line_id, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title, pl.unit_cost_paisa::text as unit_cost,
            coalesce((select sum(g.qty) from gr_lines g where g.po_line_id = pl.id), 0)::int as received,
            coalesce((select sum(o.qty) from bill_lines o where o.po_line_id = pl.id and o.bill_id <> ${billId}), 0)::int as billed_qty,
            coalesce((select sum(o.qty * o.unit_price_paisa) from bill_lines o where o.po_line_id = pl.id and o.bill_id <> ${billId}), 0)::text as billed_value,
@@ -983,7 +1000,7 @@ export const reorderSuggestions = async (
       where po.cancelled_at is null
       order by pl.variant_id, po.ordered_on desc, pl.id desc
     )
-    select va.id as variant_id, st.key as store, va.sku, p.title || ' · ' || va.title as title,
+    select va.id as variant_id, st.key as store, va.sku, p.title || case when va.title = 'Default Title' then '' else ' · ' || va.title end as title,
            coalesce(d.units, 0) as delivered,
            coalesce((select q.qty from stock_quants q join locations l on l.id = q.location_id where q.variant_id = va.id and l.key = 'warehouse'), 0)::int as warehouse,
            coalesce(oo.units, 0) as on_order, coalesce(rq.units, 0) as requests,

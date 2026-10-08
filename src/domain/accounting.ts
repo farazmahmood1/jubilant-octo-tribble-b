@@ -35,6 +35,7 @@ import { canonicalOrder, deliveryEpisodes, parcelTimeline } from './order-state.
 
 export const ACCOUNT_CODES = {
   bank: '1000',
+  cash: '1010',
   codReceivable: '1100',
   customerReceivable: '1150',
   partnerReceivable: '1200',
@@ -53,6 +54,11 @@ export const ACCOUNT_CODES = {
   postexTax: '6020',
   marketing: '6100',
   writeOff: '6200',
+  advertising: '6300',
+  salaries: '6310',
+  rent: '6320',
+  packaging: '6330',
+  utilities: '6340',
   general: '6900',
 } as const;
 
@@ -802,7 +808,7 @@ export const OPENING_SOURCE: Source = { type: 'opening_balance', id: 'opening' }
 
 /** Accounts an opening balance can be entered on: the balance sheet. P&L accounts start at zero. */
 export const BALANCE_SHEET_KEYS: readonly AccountKey[] = [
-  'bank', 'codReceivable', 'customerReceivable', 'partnerReceivable', 'inventory', 'inputTax', 'payable', 'salesTaxPayable', 'equity',
+  'bank', 'cash', 'codReceivable', 'customerReceivable', 'partnerReceivable', 'inventory', 'inputTax', 'payable', 'salesTaxPayable', 'equity',
 ];
 
 export interface OpeningLine {
@@ -955,7 +961,7 @@ export interface InventoryCheck {
 export const inventoryCheck = async (db: Db, asAt: string): Promise<InventoryCheck> => {
   const end = endOfKarachiDay(asAt);
   const rows = await db<{ variant_id: string; sku: string | null; title: string; units: number }[]>`
-    select v.id as variant_id, v.sku, p.title || ' · ' || v.title as title, sum(m.units)::int as units
+    select v.id as variant_id, v.sku, p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end as title, sum(m.units)::int as units
     from (
       select variant_id, qty as units, to_location_id as location_id, occurred_at from stock_moves
       union all

@@ -18,7 +18,8 @@ export class ShopifyError extends Error {
 
 interface GraphqlResponse<T> {
   data?: T;
-  errors?: Array<{ message: string; extensions?: { code?: string } }>;
+  /** A list for GraphQL errors; a plain string when Shopify refuses the request itself (a bad token, an unknown shop). */
+  errors?: Array<{ message: string; extensions?: { code?: string } }> | string;
   extensions?: { cost?: { requestedQueryCost: number; throttleStatus: { currentlyAvailable: number; restoreRate: number } } };
 }
 
@@ -58,7 +59,8 @@ export class ShopifyClient {
       }
 
       const body = (await response.json().catch(() => ({}))) as GraphqlResponse<T>;
-      const message = body.errors?.map((e) => e.message).join('; ');
+      const errors = Array.isArray(body.errors) ? body.errors : [];
+      const message = typeof body.errors === 'string' ? body.errors : errors.map((e) => e.message).join('; ') || undefined;
 
       if (message && /throttled/i.test(message) && attempt < MAX_ATTEMPTS) {
         await sleep(2_000 * attempt);
@@ -67,7 +69,7 @@ export class ShopifyClient {
       if (!response.ok || message) {
         throw new ShopifyError(
           `Shopify ${this.store.key}: ${message ?? `HTTP ${response.status}`}`,
-          body.errors?.[0]?.extensions?.code,
+          errors[0]?.extensions?.code,
           response.status,
         );
       }

@@ -178,6 +178,9 @@ describe('Confirmations page', { skip: skipWithoutDb }, () => {
     await newOrder({ phone: PHONE, city: 'Multan', tags: ['❌ Order Canceled'] });
     const neighbour = await newOrder({ phone: OTHER_PHONE, city: ' multan ' });
     await book(neighbour, [['0005', '2026-09-03T10:00:00Z']]);
+    // Booked by hand in PostEx, with no Shopify order: still this customer's refusal, and Multan's.
+    const byHand = await parcel(s.schema.sql, { accountId: account, orderId: null, events: [['0013', '2026-07-03T10:00:00Z'], ['0006', '2026-07-09T10:00:00Z']] });
+    await s.schema.sql`update shipments set customer_phone = ${PHONE}, city = 'MULTAN' where id = ${byHand}`;
     const current = await newOrder({ phone: PHONE, city: 'Multan' });
 
     // Typed the local way: the lookup normalises it to +92… first.
@@ -185,17 +188,19 @@ describe('Confirmations page', { skip: skipWithoutDb }, () => {
     assert.equal(history.phone, PHONE);
     assert.deepEqual(new Set(history.orders.map((o) => o.store)), new Set(['nur', 'organics']), 'both brands');
     assert.ok(!history.orders.some((o) => o.orderId === current || o.orderId === neighbour));
-    assert.deepEqual([history.counts.delivered, history.counts.refused, history.counts.cancelled], [1, 1, 1]);
-    assert.equal(history.deliveryRate, 0.5);
-    // Multan: the customer's delivered and refused parcels, and the neighbour's delivered one.
-    assert.deepEqual(history.city, { name: 'Multan', delivered: 2, returned: 1, returnRate: 1 / 3 });
+    assert.deepEqual([history.counts.delivered, history.counts.refused, history.counts.cancelled], [1, 2, 1]);
+    assert.deepEqual(history.parcels.map((p) => [p.shipmentId, p.outcome]), [[byHand, 'refused']], 'the parcel with no order is listed');
+    assert.equal(history.counts.parcelsWithoutOrder, 1);
+    assert.equal(history.deliveryRate, 1 / 3);
+    // Multan: the customer's delivered and two refused parcels, and the neighbour's delivered one.
+    assert.deepEqual(history.city, { name: 'Multan', delivered: 2, returned: 2, returnRate: 0.5 });
     assert.equal(await customerHistory(s.schema.sql, '042-1234567'), null, 'a landline is not a key');
 
     const desk = (await deskOrder(s.schema.sql, current))!;
     assert.deepEqual([desk.phone, desk.whatsappUrl, desk.callUrl], [PHONE, 'https://wa.me/923000000101', `tel:${PHONE}`]);
     assert.ok(desk.statusTags.includes('didnt answer the call') && !desk.statusTags.includes('COD-Confirmed'), 'NUR\'s own tags');
     const queued = (await deskQueue(s.schema.sql, { view: 'new', search: '0300 0000101', page: 1, pageSize: 50 })).rows.find((r) => r.orderId === current)!;
-    assert.deepEqual(queued.history, { delivered: 1, returned: 1 }, 'the queue row carries the same counts');
+    assert.deepEqual(queued.history, { delivered: 1, returned: 2 }, 'the queue row carries the same counts');
   });
 
   it('ALERTS from tags: confirmed but not booked after 24 hours, cleared by booking; cancelled but booked, cleared when PostEx cancels', async () => {

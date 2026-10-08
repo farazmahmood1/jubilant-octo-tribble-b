@@ -74,6 +74,8 @@ export interface ParcelRow {
   orderRef: string | null;
   pr: boolean;
   checkedIn: 'restocked' | 'damaged' | null;
+  /** For a checked-in parcel, the latest attempt to carry the check-in to Shopify. */
+  shopifySync: { outcome: 'done' | 'skipped' | 'failed'; message: string } | null;
 }
 
 const SORT_SQL: Record<(typeof PARCEL_SORTS)[number], string> = {
@@ -111,14 +113,19 @@ export const listParcels = async (db: Db, f: ParcelFilter): Promise<{ rows: Parc
     id: string; tracking_number: string; account: string; store: string | null; stage: Stage; status_code: string | null; status_message: string | null;
     city: string | null; cod: string | null; booked_at: Date | null; status_updated_at: Date | null; days: number | null; attempts_count: number;
     last_failure_reason: string | null; order_id: string | null; order_number: string | null; order_ref_number: string | null; pr: boolean;
-    checked_in: 'restocked' | 'damaged' | null;
+    checked_in: 'restocked' | 'damaged' | null; sync_outcome: 'done' | 'skipped' | 'failed' | null; sync_message: string | null;
   }[]>`
     select * from (
       select s.id, s.tracking_number, a.key as account, st.key as store, ${db.unsafe(STAGE_SQL)} as stage, s.status_code, s.status_message,
              s.city, s.cod_amount_paisa::text as cod, s.cod_amount_paisa as cod_sort, s.booked_at, s.status_updated_at, ${db.unsafe(DAYS_SQL)} as days,
              s.attempts_count, s.last_failure_reason, s.order_id, o.order_number, s.order_ref_number, shipment_is_pr(s.id) as pr,
-             (select c.outcome from return_check_ins c where c.shipment_id = s.id) as checked_in
+             (select c.outcome from return_check_ins c where c.shipment_id = s.id) as checked_in,
+             w.outcome as sync_outcome, w.detail->>'message' as sync_message
       from shipments s
+      left join lateral (
+        select wb.outcome, wb.detail from shopify_writebacks wb join return_check_ins c on c.id = wb.check_in_id
+        where c.shipment_id = s.id order by wb.at desc, wb.id desc limit 1
+      ) w on true
       join postex_accounts a on a.id = s.postex_account_id
       left join stores st on st.id = a.store_id
       left join orders o on o.id = s.order_id
@@ -161,6 +168,7 @@ export const listParcels = async (db: Db, f: ParcelFilter): Promise<{ rows: Parc
       orderRef: r.order_ref_number,
       pr: r.pr,
       checkedIn: r.checked_in,
+      shopifySync: r.sync_outcome ? { outcome: r.sync_outcome, message: r.sync_message ?? '' } : null,
     })),
   };
 };
@@ -223,6 +231,10 @@ export const parcelDetail = async (db: Db, id: string): Promise<ParcelDetail | n
   const [checkIn] = await db<{ outcome: 'restocked' | 'damaged'; checked_in_at: Date; by: string; note: string | null }[]>`
     select c.outcome, c.checked_in_at, u.name as by, c.note from return_check_ins c join users u on u.id = c.actor_id where c.shipment_id = ${id}
   `;
+  const [sync] = await db<{ outcome: 'done' | 'skipped' | 'failed'; message: string | null }[]>`
+    select wb.outcome, wb.detail->>'message' as message from shopify_writebacks wb join return_check_ins c on c.id = wb.check_in_id
+    where c.shipment_id = ${id} order by wb.at desc, wb.id desc limit 1
+  `;
   let order: ParcelDetail['order'] = null;
   if (s.order_id) {
     const [o] = await db<{ id: string; order_number: string; store: string; placed_at: Date; total: string; state: string | null; financial_status: string | null; customer_name: string | null; city: string | null }[]>`
@@ -277,6 +289,7 @@ export const parcelDetail = async (db: Db, id: string): Promise<ParcelDetail | n
     customerPhone: s.customer_phone,
     pr: s.pr,
     checkedIn: checkIn?.outcome ?? null,
+    shopifySync: sync ? { outcome: sync.outcome, message: sync.message ?? '' } : null,
     events: events.map((e) => ({ code: e.code, message: e.message, occurredAt: e.occurred_at })),
     charges: charges.map((c) => ({ kind: c.kind, amountPaisa: c.amount })),
     payouts: payouts.map((p) => ({ cprNumber: p.cpr_number, paidAt: p.paid_at, amountPaisa: p.amount })),

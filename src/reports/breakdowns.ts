@@ -216,7 +216,7 @@ const productQuery = (db: Db, f: ReportFilter, explain = false) =>
     )
     select m.shipment_id::text, m.revenue::text, m.goods::text, m.sales::int, ol.variant_id::text, ol.id is not null as has_line,
            ol.qty, ol.total_paisa::text as line_total, c.unit_cost_paisa::text as unit_cost,
-           st.key as store, coalesce(v.sku, ol.sku) as sku, coalesce(p.title || ' · ' || v.title, ol.title) as title
+           st.key as store, coalesce(v.sku, ol.sku) as sku, coalesce(p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end, ol.title) as title
     from moved m
     join shipments s on s.id = m.shipment_id
     left join orders o on o.id = s.order_id

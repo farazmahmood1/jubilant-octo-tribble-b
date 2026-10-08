@@ -50,6 +50,27 @@ const opening = z.object({
 });
 
 const entryParams = z.object({ id: z.string().regex(ID) });
+
+/** Journal sources, grouped the way a person thinks of them, for the journal's filter. */
+export const SOURCE_GROUPS = {
+  sales: ['shipment_sale', 'consignment_sale'],
+  cost: ['shipment_cogs', 'consignment_cogs', 'shipment_write_off', 'pr_send'],
+  postex: ['shipment_forward_charge', 'shipment_return_charge'],
+  cash: ['payout_line', 'partner_payment'],
+  purchases: ['goods_receipt', 'vendor_bill', 'vendor_payment'],
+  expenses: ['expense'],
+  opening: ['opening_balance'],
+  reversals: ['reversal'],
+} as const;
+const journalQuery = z.object({
+  from: z.string().regex(DAY).optional(),
+  to: z.string().regex(DAY).optional(),
+  store,
+  group: z.enum(Object.keys(SOURCE_GROUPS) as [keyof typeof SOURCE_GROUPS, ...Array<keyof typeof SOURCE_GROUPS>]).optional(),
+  q: z.string().trim().max(80).optional(),
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+  size: z.coerce.number().int().min(1).max(200).default(50),
+});
 const pageQuery = z.object({ page: z.coerce.number().int().min(1).max(1_000_000).default(1), size: z.coerce.number().int().min(1).max(200).default(25) });
 const invoicesQuery = pageQuery.extend({ store, voided: z.enum(['true', 'false']).optional() });
 const paymentsQuery = pageQuery.extend({ direction: z.enum(['in', 'out']).optional() });
@@ -87,6 +108,54 @@ export const accountingRouter = (getSql: SqlProvider): Router => {
     const id = await storeId(query.store);
     const lines = await accountLedger(sql, code, { limit: query.limit, ...(query.to ? { to: query.to } : {}), ...(id ? { storeId: id } : {}) });
     res.json({ lines: lines.map(asText) });
+  });
+
+  /**
+   * The journal, newest first: every entry the system or a person posted, with its total and the
+   * brands it touched. Filter by days, brand, kind of source and memo text (tracking numbers are in
+   * the memo). Each row opens the entry below.
+   */
+  router.get('/accounting/entries', async (req, res) => {
+    const sql = requireSql(getSql);
+    const q = parse(journalQuery, req.query);
+    const id = await storeId(q.store);
+    const like = q.q ? `%${q.q.replace(/[%_\\]/g, '\\$&')}%` : null;
+    const where = sql`
+      ${q.from ? sql`and e.entry_date >= ${q.from}::date` : sql``}
+      ${q.to ? sql`and e.entry_date <= ${q.to}::date` : sql``}
+      ${id ? sql`and exists (select 1 from journal_lines l where l.entry_id = e.id and l.store_id = ${id})` : sql``}
+      ${q.group ? sql`and e.source_type = any(${[...SOURCE_GROUPS[q.group]]}::text[])` : sql``}
+      ${like ? sql`and e.memo ilike ${like}` : sql``}
+    `;
+    const rows = await sql<
+      { id: string; date: string; memo: string; source_type: string; source_id: string; amount: string; posted_by: string | null; reverses_id: string | null; reversed_by: string | null; stores: string[] | null }[]
+    >`
+      select e.id, e.entry_date::text as date, e.memo, e.source_type, e.source_id, u.name as posted_by, e.reverses_id::text, e.reversed_by::text,
+             (select sum(l.debit_paisa)::text from journal_lines l where l.entry_id = e.id) as amount,
+             (select array_agg(distinct st.key order by st.key) from journal_lines l join stores st on st.id = l.store_id where l.entry_id = e.id) as stores
+      from journal_entries e left join users u on u.id = e.posted_by
+      where true ${where}
+      order by e.entry_date desc, e.id desc
+      limit ${q.size} offset ${(q.page - 1) * q.size}
+    `;
+    const [count] = await sql<{ n: number }[]>`select count(*)::int as n from journal_entries e where true ${where}`;
+    res.json({
+      total: count!.n,
+      page: q.page,
+      pageSize: q.size,
+      rows: rows.map((r) => ({
+        id: r.id,
+        date: r.date,
+        memo: r.memo,
+        sourceType: r.source_type,
+        sourceId: r.source_id,
+        amount: r.amount ?? '0',
+        postedBy: r.posted_by,
+        reversesId: r.reverses_id,
+        reversedBy: r.reversed_by,
+        stores: r.stores ?? [],
+      })),
+    });
   });
 
   /**
