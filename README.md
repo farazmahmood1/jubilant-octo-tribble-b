@@ -83,8 +83,8 @@ Set `DB_MIGRATE_ON_BOOT=false` to manage the schema by hand with `npm run migrat
 Two jobs fill the catalogue and the last 60 days of orders from both stores:
 
 ```bash
-npm run job -- shopify:catalogue   # every product and variant; hourly on the worker
-npm run job -- shopify:orders      # orders updated since the saved cursor; hourly on the worker
+npm run job -- shopify:catalogue   # every product and variant; every 2 minutes on the worker
+npm run job -- shopify:orders      # orders updated since the saved cursor; every 2 minutes on the worker
 ```
 
 Each prints its stats as totals and per store (`nur.fetched`, `organics.inserted`, ...):
@@ -122,13 +122,13 @@ estimate (`GET /api/v1/stock/shopify-comparison`, `POST /api/v1/stock/opening-fr
 
 ## PostEx sync
 
-`npm run job -- postex:sync` (every 15 minutes on the worker, see *Worker schedule*) does four
+`npm run job -- postex:sync` (every 2 minutes on the worker, see *Worker schedule*) does four
 things per account, read-only (PostEx has no write call anywhere in this code):
 
 1. **Find new parcels.** `get-all-order` from the account's cursor (minus 3 days) to today, in
-   31-day chunks, at most every 15 minutes. The first run starts from 1 January 2026.
+   31-day chunks, at most every 2 minutes. The first run starts from 1 January 2026.
 2. **Refresh what is due**, 25 parcels per `track-bulk-order` call, by tier: new parcels now; out
-   for delivery or attempted every 5 minutes; other open parcels every 15 minutes; open parcels
+   for delivery or attempted every 2 minutes; other open parcels every 2 minutes; open parcels
    booked over 30 days ago daily; delivered, returned or cancelled in the last 7 days daily (late
    fee corrections); older terminal parcels never.
 3. **Link parcels to orders** with the matcher: first by the tracking number the "Book at
@@ -168,7 +168,7 @@ location, and are audited. Order lines with no catalogue variant cannot move and
 
 ## Reconciliation queue
 
-`reconciliation:scan` (hourly) checks every parcel against the five Step 9 rules in
+`reconciliation:scan` (every 2 minutes) checks every parcel against the five Step 9 rules in
 `src/domain/reconciliation.ts` and keeps `reconciliation_items` equal to what they find:
 unmatched parcel, COD different from what the order should collect (nothing on a paid order),
 possible duplicate booking (two live parcels for one order), stuck in transit (no status change
@@ -440,7 +440,7 @@ file can be imported again. Also: `GET|POST /api/v1/consignment/partners`,
 Migration `0016_pr.sql` (Batch H, PR half), rules in `src/domain/pr.ts`. A PR send is marketing:
 no sale, not a return when it comes back, its goods and PostEx charges expensed to 6100.
 
-**Detection** (`pr:detect`, hourly; or `POST /api/v1/pr/detect`) finds sends made outside the
+**Detection** (`pr:detect`, every 2 minutes; or `POST /api/v1/pr/detect`) finds sends made outside the
 platform and only ever inserts, so a re-run changes nothing and never touches a decided send:
 a Shopify order tagged `PR` is PR (the team marked it); an order discounted to zero, and a PostEx
 parcel with zero COD, are **suggestions**. CLAUDE.md and note S16: each zero-COD parcel is
@@ -490,11 +490,10 @@ API (signed in): `GET /api/v1/reports/breakdowns/:dimension?from=&to=&store=` an
 
 ## Worker schedule
 
-Neon suspends its compute when nothing queries it, so the jobs are timed to wake it as rarely as
-possible (risk R3, note S4): `postex:sync` and `shopify:catchup` run together on the quarter hour,
-the hourly jobs on the hour, and `postex:payouts` daily. Only while a parcel is out for delivery
-or has a failed attempt does `postex:sync` ask for 5 minutes. From 23:00 to 08:00 Karachi
-everything runs at most hourly.
+Every Shopify and PostEx job runs every 2 minutes, around the clock (`SYNC_EVERY_MS` in
+`src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `postex:sync`,
+`reconciliation:scan` and `pr:detect`. `postex:payouts` stays daily. Neon therefore never gets to
+suspend its compute while the worker runs; that is the cost of the freshness (risk R3).
 
 ## Shopify webhooks
 
@@ -512,7 +511,7 @@ everything runs at most hourly.
   re-fetch the order through GraphQL and store it like the sync does.
 - **GDPR.** Redaction scrubs names, phones, street addresses and postcodes from the tables and from
   the raw payloads, and is audited; a data request is queued for a person.
-- **`shopify:catchup`** (every 15 minutes) processes stuck events, retries skipped orders from the
+- **`shopify:catchup`** (every 2 minutes) processes stuck events, retries skipped orders from the
   review queue, and re-reads the last two hours of orders, which recovers a webhook Shopify never
   delivered.
 

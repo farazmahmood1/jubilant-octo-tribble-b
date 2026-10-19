@@ -33,7 +33,7 @@ import {
 } from '../integrations/shopify/queries.js';
 import { formatKarachi } from '../lib/time.js';
 import type { Logger } from '../logger.js';
-import type { JobDefinition, JobStats } from './runner.js';
+import { type JobDefinition, type JobStats, SYNC_EVERY_MS } from './runner.js';
 
 export const CATALOGUE_JOB = 'shopify:catalogue';
 export const ORDERS_JOB = 'shopify:orders';
@@ -437,14 +437,13 @@ export const configuredStores = async (sql: Sql): Promise<StoreTarget[]> => {
 export const shopifyJobs: JobDefinition[] = [
   {
     name: CATALOGUE_JOB,
-    schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
+    schedule: { everyMs: SYNC_EVERY_MS, alignToClock: true },
     handler: async ({ sql, logger, signal }) => syncCatalogue({ sql, logger, signal, stores: await configuredStores(sql) }),
   },
   {
     name: ORDERS_JOB,
-    // Webhooks are the fast path and shopify:catchup the 15-minute safety net, so the full cursor
-    // walk only needs to run hourly.
-    schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
+    // Webhooks are the fast path and shopify:catchup the safety net; the cursor walk runs with them.
+    schedule: { everyMs: SYNC_EVERY_MS, alignToClock: true },
     handler: async ({ sql, logger, signal }) => syncOrders({ sql, logger, signal, stores: await configuredStores(sql) }),
   },
 ];

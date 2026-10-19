@@ -88,6 +88,9 @@ export const nextDelayMs = (schedule: JobSchedule, now: Date, requestedMs?: numb
  */
 export const OVERNIGHT: NonNullable<JobSchedule['quiet']> = { fromHour: 23, toHour: 8, everyMs: 60 * 60 * 1000 };
 
+/** How often every Shopify and PostEx sync runs, around the clock. The one knob for sync freshness. */
+export const SYNC_EVERY_MS = 2 * 60 * 1000;
+
 export class UnknownJobError extends Error {
   constructor(name: string, known: string[]) {
     super(`Unknown job "${name}". Known jobs: ${known.length ? known.join(', ') : '(none)'}`);

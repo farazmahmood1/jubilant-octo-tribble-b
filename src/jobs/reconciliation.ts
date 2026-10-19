@@ -13,7 +13,7 @@ import {
   evaluateOrder,
 } from '../domain/reconciliation.js';
 import type { Logger } from '../logger.js';
-import type { JobDefinition, JobStats } from './runner.js';
+import { type JobDefinition, type JobStats, SYNC_EVERY_MS } from './runner.js';
 
 export const RECONCILIATION_JOB = 'reconciliation:scan';
 export const DEFAULT_STUCK_DAYS = 7;
@@ -180,7 +180,7 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
 
 export const reconciliationJob: JobDefinition = {
   name: RECONCILIATION_JOB,
-  // Hourly, on the hour with the other hourly jobs (risk R3). Parcels move by the hour at most.
-  schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
+  // With the syncs, so a new parcel or order is checked as soon as it lands.
+  schedule: { everyMs: SYNC_EVERY_MS, alignToClock: true },
   handler: async ({ sql, logger }) => scanReconciliation({ sql, logger }),
 };
