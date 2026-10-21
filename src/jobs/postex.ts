@@ -24,7 +24,7 @@ import { toCharges, toShipment, toShipmentEvents } from '../integrations/postex/
 import { formatKarachi } from '../lib/time.js';
 import type { Logger } from '../logger.js';
 import { matchUnmatched } from './postex-match.js';
-import { type JobContext, type JobDefinition, type JobStats, OVERNIGHT } from './runner.js';
+import { type JobContext, type JobDefinition, type JobStats, SYNC_EVERY_MS } from './runner.js';
 
 export const POSTEX_JOB = 'postex:sync';
 
@@ -57,7 +57,7 @@ export interface PostexDeps {
 
 export const HISTORY_FROM = '2026-01-01';
 /** Listing finds new parcels; detail refreshes known ones. New parcels can wait this long to be found. */
-export const LIST_EVERY_MS = 15 * 60 * 1000;
+export const LIST_EVERY_MS = SYNC_EVERY_MS;
 /** Re-list this many days before the last listed date: a parcel booked late in the day can land on either side. */
 export const LIST_OVERLAP_DAYS = 3;
 /** Days per get-all-order call, so one call never spans the whole history. */
@@ -275,7 +275,7 @@ export const configuredPostexAccounts = async (sql: Sql): Promise<PostexAccountT
 };
 
 /** Polled this often while any parcel is out for delivery or has a failed attempt. */
-export const ACTIVE_EVERY_MS = 5 * 60 * 1000;
+export const ACTIVE_EVERY_MS = SYNC_EVERY_MS;
 
 /** One scheduled run: the sync, then a request for 5 minutes only if a parcel is active. */
 export const runPostexSync = async (
@@ -290,9 +290,8 @@ export const runPostexSync = async (
 
 export const postexJob: JobDefinition = {
   name: POSTEX_JOB,
-  // Every 15 minutes on the quarter hour, with shopify:catchup, so the database wakes once for
-  // both (risk R3). Only while a parcel is out for delivery does the run ask for 5 minutes, the
-  // fastest refresh tier; overnight in Karachi it is hourly regardless (note S4).
-  schedule: { everyMs: LIST_EVERY_MS, alignToClock: true, quiet: OVERNIGHT },
+  // Every 2 minutes around the clock, with shopify:catchup. PostEx has no webhooks, so this is
+  // how fast a booking or a status change shows up.
+  schedule: { everyMs: LIST_EVERY_MS, alignToClock: true },
   handler: async (ctx) => runPostexSync(ctx, await configuredPostexAccounts(ctx.sql)),
 };

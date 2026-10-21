@@ -3,7 +3,7 @@ import { recomputeOrderState } from '../db/repos/order-state.js';
 import { openReviewItem } from '../db/repos/review.js';
 import { type Db, atomically, readPaisa } from '../db/repos/upsert.js';
 import { costAt } from '../db/repos/variants.js';
-import type { JobDefinition } from '../jobs/runner.js';
+import { type JobDefinition, SYNC_EVERY_MS } from '../jobs/runner.js';
 import { type Paisa, ZERO, add, paisa } from '../lib/money.js';
 import { cogsLines, karachiDay, postShipmentAccounting, settle } from './accounting.js';
 import { locationId, reconcileShipmentStock, recordMove } from './stock.js';
@@ -92,8 +92,8 @@ export const PR_DETECT_JOB = 'pr:detect';
 
 export const prDetectJob: JobDefinition = {
   name: PR_DETECT_JOB,
-  // Hourly, after the order and parcel syncs have had their turn.
-  schedule: { everyMs: 60 * 60 * 1000, alignToClock: true },
+  // With the order and parcel syncs, so a PR send is found as soon as it lands.
+  schedule: { everyMs: SYNC_EVERY_MS, alignToClock: true },
   handler: async ({ sql, logger }) => {
     const stats = await detectPrSends(sql);
     logger.info({ ...stats }, 'PR detection finished');

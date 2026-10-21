@@ -1,5 +1,5 @@
 import { processPendingWebhooks } from '../webhooks/shopify.js';
-import { type JobDefinition, type JobStats, OVERNIGHT } from './runner.js';
+import { type JobDefinition, type JobStats, SYNC_EVERY_MS } from './runner.js';
 import { type Counts, type SyncDeps, configuredStores, flatten, retrySkippedOrders, syncOrders } from './shopify.js';
 
 export const CATCHUP_JOB = 'shopify:catchup';
@@ -10,7 +10,7 @@ export const CATCHUP_WINDOW_MS = 2 * 60 * 60 * 1000;
 export const PENDING_WEBHOOK_AGE_MS = 2 * 60 * 1000;
 
 /**
- * The safety net behind webhooks, every 15 minutes:
+ * The safety net behind webhooks, every 2 minutes:
  * 1. process webhook events that were received but never processed (the process died, or
  *    Shopify's API was down when it tried);
  * 2. retry orders the sync could not store, from the review queue;
@@ -32,7 +32,7 @@ export const catchUp = async (deps: SyncDeps): Promise<JobStats> => {
 
 export const catchupJob: JobDefinition = {
   name: CATCHUP_JOB,
-  // On the quarter hour with postex:sync, so the two wake the database together; hourly overnight.
-  schedule: { everyMs: 15 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT },
+  // Same cadence as postex:sync, around the clock.
+  schedule: { everyMs: SYNC_EVERY_MS, alignToClock: true },
   handler: async ({ sql, logger, signal }) => catchUp({ sql, logger, signal, stores: await configuredStores(sql) }),
 };

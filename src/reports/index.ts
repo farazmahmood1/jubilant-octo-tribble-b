@@ -11,6 +11,7 @@ import { explainPnl } from './pnl.js';
 import { explainProfitPerParcel } from './profit-per-parcel.js';
 import { explainReturnRate } from './return-rate.js';
 import { explainReturnRateBy } from './return-rate-by.js';
+import { explainSales } from './sales.js';
 import { explainTrialBalance } from './trial-balance.js';
 
 /**
@@ -32,6 +33,7 @@ export * from './profit-per-parcel.js';
 export * from './recent-orders.js';
 export * from './return-rate.js';
 export * from './return-rate-by.js';
+export * from './sales.js';
 export * from './trial-balance.js';
 
 export interface ReportPlan {
@@ -54,6 +56,7 @@ export const REPORT_PLANS: Record<string, ReportPlan> = {
   returnRateBy: { plan: explainReturnRateBy, needs: ['shipments_booked_idx'] },
   deliverySuccess: { plan: explainDeliverySuccess, needs: ['shipments_booked_idx'] },
   orderFunnel: { plan: explainOrderFunnel, needs: ['orders_placed_idx'] },
+  sales: { plan: explainSales, needs: ['orders_placed_idx'] },
   cashAwaitingPayout: { plan: explainCashAwaitingPayout, needs: ['journal_lines_account_idx', 'journal_entries_live_source_key'] },
   profitPerParcel: { plan: explainProfitPerParcel, needs: ['journal_entries_date_idx'] },
   productBreakdown: { plan: explainProductBreakdown, needs: ['journal_entries_date_idx', 'product_costs_lookup_idx'] },

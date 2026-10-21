@@ -14,6 +14,7 @@ import {
   recentOrders,
   returnRate,
   returnRateBy,
+  sales,
   drillBreakdown,
   drillProductBreakdown,
   ledgerLinesPage,
@@ -110,7 +111,8 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
     const sql = requireSql(getSql);
     const f = filterOf(parse(filterQuery, req.query));
     const asOf = f.to ?? todayInKarachi();
-    const [revenue, profit, returns, delivery, cash, perParcel] = await Promise.all([
+    const [orderSales, revenue, profit, returns, delivery, cash, perParcel] = await Promise.all([
+      sales(sql, f),
       deliveredRevenue(sql, f),
       netProfit(sql, f),
       returnRate(sql, f),
@@ -121,6 +123,7 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
     res.json(
       json({
         period: { from: f.from ?? null, to: f.to ?? null, asOf, store: f.store ?? null },
+        sales: orderSales,
         deliveredRevenue: revenue,
         profit,
         returnRate: returns,

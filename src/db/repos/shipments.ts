@@ -180,8 +180,8 @@ export interface RefreshTiers {
 }
 
 export const DEFAULT_TIERS: RefreshTiers = {
-  activeMs: 5 * 60 * 1000,
-  defaultMs: 15 * 60 * 1000,
+  activeMs: 2 * 60 * 1000,
+  defaultMs: 2 * 60 * 1000,
   staleAfterMs: 30 * 24 * 60 * 60 * 1000,
   terminalWatchMs: 7 * 24 * 60 * 60 * 1000,
   dailyMs: 24 * 60 * 60 * 1000,
@@ -190,9 +190,9 @@ export const DEFAULT_TIERS: RefreshTiers = {
 /**
  * Parcels of one account whose detail is due for a refresh at `now`, by tier:
  * - never synced: now;
- * - out for delivery, or attempted (`0013`): every 5 minutes;
+ * - out for delivery, or attempted (`0013`): every 2 minutes;
  * - booked over 30 days ago and still open: daily (stale);
- * - other open parcels: every 15 minutes;
+ * - other open parcels: every 2 minutes;
  * - delivered, returned or cancelled in the last 7 days: daily, for late fee corrections;
  * - older terminal parcels: never.
  */
