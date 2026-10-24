@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { ShipmentEvent } from '../integrations/postex/mapper.js';
-import { toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
+import { POSTEX_STATUS_CODES, toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
 import { parsePostexLocal } from '../lib/time.js';
 import { fixture } from '../test/fixtures.js';
 import {
@@ -34,7 +34,7 @@ const event = (code: string, at: string | null, message = `status ${code}`): Shi
   code,
   message,
   occurredAt: at === null ? null : parsePostexLocal(at),
-  known: ['0002', '0005', '0006', '0008', '0013', '0040'].includes(code),
+  known: Object.hasOwn(POSTEX_STATUS_CODES, code),
 });
 
 const input = (overrides: Partial<OrderStateInput>): OrderStateInput => ({
@@ -83,6 +83,11 @@ const scenarios: Scenario[] = [
   { name: 'booked with no history → booked, decided by the shipment', input: input({ ...booked }), state: 'booked' },
   { name: 'a list row has no history → booked', input: input({ shipment: listDelivered!, events: [] }), state: 'booked' },
   { name: '0008 under review moves a booked parcel to in_transit', input: input({ ...booked, events: [event('0008', '2026-09-19 10:00:00', 'Under review')] }), state: 'in_transit', decidedByCode: '0008' },
+  { name: 'routine movement codes move a booked parcel to in_transit and are not flagged', input: input({ ...booked, events: [event('0001', '2026-09-19 10:00:00'), event('0031', '2026-09-19 12:00:00'), event('0004', '2026-09-20 09:00:00')] }), state: 'in_transit', decidedByCode: '0001' },
+  { name: 'routine movement codes then delivery → delivered, not flagged', input: input({ ...booked, events: [event('0035', '2026-09-19 10:00:00'), event('0038', '2026-09-19 12:00:00'), event('0005', '2026-09-20 09:00:00', 'Delivered')] }), state: 'delivered', decidedByCode: '0005' },
+  // The return path as PostEx reports it: the return-leg codes decide nothing, 0040 and 0006 do.
+  { name: 'return leg after a failed attempt: still returning until 0006, decided by 0040, not flagged', input: input({ shipment: returned.shipment, events: [attempt1, event('0039', '2026-05-22 20:00:00'), event('0040', '2026-05-23 05:00:00'), event('0037', '2026-05-24 09:00:00'), event('0035', '2026-05-24 12:00:00'), event('0039', '2026-05-25 09:00:00'), event('0032', '2026-05-26 09:00:00')] }), state: 'returning', decidedByCode: '0040' },
+  { name: 'return leg then 0006 → returned_received, decided by 0006, not flagged', input: input({ shipment: returned.shipment, events: [attempt1, event('0039', '2026-05-22 20:00:00'), event('0040', '2026-05-23 05:00:00'), event('0037', '2026-05-24 09:00:00'), event('0032', '2026-05-26 09:00:00'), event('0006', '2026-05-27 09:00:00')] }), state: 'returned_received', decidedByCode: '0006' },
   { name: '0008 after a failed attempt changes nothing', input: input({ shipment: returned.shipment, events: [attempt1, event('0008', '2026-05-21 20:00:00')] }), state: 'failed', decidedByCode: '0013' },
   { name: 'delivered then a later 0040 → returning (the later event wins)', input: input({ shipment: delivered.shipment, events: [deliveredEvent, event('0040', '2026-06-30 10:00:00')] }), state: 'returning', decidedByCode: '0040' },
   { name: 'an undated event is replayed last and flagged', input: input({ shipment: returned.shipment, events: [event('0040', null), attempt1] }), state: 'returning', decidedByCode: '0040', anomalies: ['undated_event'] },

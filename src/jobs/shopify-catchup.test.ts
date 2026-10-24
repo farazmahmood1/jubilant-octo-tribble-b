@@ -10,6 +10,7 @@ import { skipWithoutDb } from '../test/db.js';
 import { type FakeShopify, fakeShopify, order } from '../test/shopify-fake.js';
 import { type Stores, migratedWithStores } from '../test/stores.js';
 import { jobs } from './registry.js';
+import { SYNC_EVERY_MS } from './runner.js';
 import { CATCHUP_JOB, catchUp } from './shopify-catchup.js';
 import { ORDERS_JOB, SKIPPED_ORDER, type SyncDeps, syncOrders } from './shopify.js';
 
@@ -43,8 +44,8 @@ describe('shopify:catchup', { skip: skipWithoutDb }, () => {
     await s?.schema.drop();
   });
 
-  it('is registered to run every 15 minutes', () => {
-    assert.equal(jobs.find((j) => j.name === CATCHUP_JOB)?.schedule.everyMs, 15 * 60 * 1000);
+  it('is registered to run every 2 minutes', () => {
+    assert.equal(jobs.find((j) => j.name === CATCHUP_JOB)?.schedule.everyMs, SYNC_EVERY_MS);
   });
 
   it('recovers a deliberately dropped webhook: an order changed in Shopify with no delivery', async () => {

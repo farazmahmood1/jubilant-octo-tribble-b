@@ -23,6 +23,33 @@ export const db = (): Sql | undefined => {
   return client;
 };
 
+let lockClient: Sql | undefined;
+
+/**
+ * The same database without Neon's pooler. The pooler gives each statement whichever server
+ * session is free, so a session-level advisory lock taken by one statement can be released, or
+ * looked for, by another: it stays held by an idle session and the job it guards is skipped for
+ * good. On the direct endpoint (no `-pooler` in the host) a reserved connection is one session.
+ */
+export const directUrl = (databaseUrl: string): string => {
+  const { hostname } = new URL(databaseUrl);
+  const direct = hostname.replace(/-pooler(?=\.)/, '');
+  return direct === hostname ? databaseUrl : databaseUrl.replace(hostname, direct);
+};
+
+/** Where the job runner takes its locks: direct, one session per running job. Nothing else should use it. */
+export const lockDb = (): Sql | undefined => {
+  if (!config.databaseUrl) return undefined;
+  const url = directUrl(config.databaseUrl);
+  lockClient ??= postgres(url, {
+    max: 10,
+    connect_timeout: 15,
+    ...sslOptions(url),
+    onnotice: (notice) => logger.debug({ notice }, 'postgres notice'),
+  });
+  return lockClient;
+};
+
 /**
  * Neon only accepts TLS, so it is required by default. A local scratch database (the one tests
  * and migrations are tried against) has no certificate, and a URL that names its own `sslmode`
@@ -50,7 +77,8 @@ export const checkDb = async (): Promise<DbHealth> => {
 };
 
 export const closeDb = async (): Promise<void> => {
-  if (!client) return;
-  await client.end({ timeout: 5 });
+  const open = [client, lockClient].filter((c): c is Sql => c !== undefined);
   client = undefined;
+  lockClient = undefined;
+  await Promise.all(open.map((c) => c.end({ timeout: 5 })));
 };

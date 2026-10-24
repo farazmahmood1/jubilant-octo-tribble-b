@@ -91,6 +91,9 @@ export const OVERNIGHT: NonNullable<JobSchedule['quiet']> = { fromHour: 23, toHo
 /** How often every Shopify and PostEx sync runs, around the clock. The one knob for sync freshness. */
 export const SYNC_EVERY_MS = 2 * 60 * 1000;
 
+/** How much sooner than its interval `runDue` still counts a job as due. */
+const DUE_TOLERANCE_MS = 20 * 1000;
+
 export class UnknownJobError extends Error {
   constructor(name: string, known: string[]) {
     super(`Unknown job "${name}". Known jobs: ${known.length ? known.join(', ') : '(none)'}`);
@@ -115,7 +118,8 @@ const errorText = (error: unknown): string => {
  * Runs registered jobs once or on a schedule.
  *
  * - **No overlap.** A job holds a Postgres advisory lock for the whole run, on a connection
- *   reserved for it. A second trigger, in this process or another worker, finds the lock taken
+ *   reserved for it (a direct one: behind a pooler each statement may reach a different session,
+ *   and a lock taken by one is never released by the next). A second trigger, in this process or another worker, finds the lock taken
  *   and is skipped. If a process dies its connection closes and the lock frees itself.
  * - **One sync_runs row per run.** Inserted as `running` before the handler starts and finished
  *   as `succeeded` or `failed` with its stats. A skipped trigger is not a run and writes nothing.
@@ -135,6 +139,8 @@ export class JobRunner {
   constructor(
     private readonly sql: Sql,
     private readonly logger: Logger,
+    /** Where job locks are taken. It must not sit behind a pooler (see `lockDb`); `sql` itself when omitted. */
+    private readonly lockSql: Sql = sql,
   ) {}
 
   register(job: JobDefinition): this {
@@ -149,16 +155,42 @@ export class JobRunner {
   }
 
   /** Runs one job now, once. Used by the scheduler, the `npm run job` CLI and tests. */
-  async runJobOnce(name: string): Promise<RunResult> {
+  async runJobOnce(name: string, signal?: AbortSignal): Promise<RunResult> {
     const job = this.jobs.get(name);
     if (!job) throw new UnknownJobError(name, this.names);
-    const run = this.execute(job);
+    const run = this.execute(job, signal);
     this.inFlight.add(run);
     try {
       return await run;
     } finally {
       this.inFlight.delete(run);
     }
+  }
+
+  /**
+   * Runs, side by side, every job whose last run started at least its interval ago (quiet hours
+   * applied), or every job named in `force` whatever its last run. For a host with no long-running
+   * process (a serverless function, woken by a cron or by the dashboard), this is the scheduler.
+   *
+   * Each job keeps its advisory lock, so a run already going elsewhere is skipped, not doubled.
+   * After `budgetMs` the jobs are told to stop at their next batch boundary; every sync saves its
+   * cursor as it goes, so the next call carries on where this one stopped.
+   */
+  async runDue(options: { budgetMs: number; force?: readonly string[]; now?: Date }): Promise<RunResult[]> {
+    const now = options.now ?? new Date();
+    const last = await this.sql<{ job: string; account_ref: string; started_at: Date }[]>`
+      select job, account_ref, max(started_at) as started_at from sync_runs group by job, account_ref
+    `;
+    const due = [...this.jobs.values()].filter((job) => {
+      if (options.force?.includes(job.name)) return true;
+      const started = last.find((r) => r.job === job.name && r.account_ref === (job.accountRef ?? 'all'))?.started_at;
+      if (!started) return true;
+      const interval = nextDelayMs({ ...job.schedule, alignToClock: false }, now);
+      // A little early is on time: callers tick on a fixed beat that drifts against the interval.
+      return now.getTime() - started.getTime() >= interval - DUE_TOLERANCE_MS;
+    });
+    const budget = AbortSignal.timeout(options.budgetMs);
+    return Promise.all(due.map((job) => this.runJobOnce(job.name, budget)));
   }
 
   /** Starts every registered job on its schedule. Each job waits for its own run to finish first. */
@@ -198,7 +230,7 @@ export class JobRunner {
     this.timers.set(job.name, timer);
   }
 
-  private async execute(job: JobDefinition): Promise<RunResult> {
+  private async execute(job: JobDefinition, stopWhen?: AbortSignal): Promise<RunResult> {
     const accountRef = job.accountRef ?? 'all';
     const startedAt = Date.now();
     const log = this.logger.child({ job: job.name, accountRef });
@@ -222,7 +254,7 @@ export class JobRunner {
     let connection: Awaited<ReturnType<Sql['reserve']>> | undefined;
     let locked = false;
     try {
-      connection = await this.sql.reserve();
+      connection = await this.lockSql.reserve();
       const [lock] = await connection<{ locked: boolean }[]>`
         select pg_try_advisory_lock(hashtext(${LOCK_NAMESPACE}), hashtext(${`${job.name}:${accountRef}`})) as locked
       `;
@@ -254,7 +286,7 @@ export class JobRunner {
           sql: this.sql,
           logger: log,
           stats,
-          signal: this.shutdown.signal,
+          signal: stopWhen ? AbortSignal.any([this.shutdown.signal, stopWhen]) : this.shutdown.signal,
           runId,
           runAgainIn: (ms) => {
             nextRunInMs = ms;

@@ -5,7 +5,7 @@
  * Exit codes: 0 succeeded, 1 failed, 2 unknown job or bad usage, 3 skipped because the job is
  * already running in another process.
  */
-import { closeDb, db } from '../db.js';
+import { closeDb, db, lockDb } from '../db.js';
 import { jobs } from '../jobs/registry.js';
 import { JobRunner, UnknownJobError, exitCodeFor } from '../jobs/runner.js';
 import { spinner } from '../lib/progress.js';
@@ -17,7 +17,7 @@ const run = async (name: string | undefined): Promise<number> => {
     console.error('DATABASE_URL is not set');
     return 2;
   }
-  const runner = new JobRunner(sql, logger);
+  const runner = new JobRunner(sql, logger, lockDb() ?? sql);
   for (const job of jobs) runner.register(job);
 
   if (!name) {

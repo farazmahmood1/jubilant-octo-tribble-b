@@ -16,7 +16,7 @@ import { type FakePostex, SPIKE, fakePostex, syntheticParcels } from '../test/po
 import { type Stores, migratedWithStores } from '../test/stores.js';
 import { ACTIVE_EVERY_MS, configuredPostexAccounts, LIST_CHUNK_DAYS, POSTEX_JOB, type PostexDeps, TRACK_BATCH, runPostexSync, syncPostex } from './postex.js';
 import { jobs } from './registry.js';
-import { OVERNIGHT } from './runner.js';
+import { SYNC_EVERY_MS } from './runner.js';
 
 const silent = pino({ level: 'silent' }) as unknown as Logger;
 /** 11:00 in Karachi on 20 September, the day after the spike's window. */
@@ -194,16 +194,16 @@ describe('status from stored events', { skip: skipWithoutDb }, () => {
 });
 
 describe('refresh tiers', { skip: skipWithoutDb }, () => {
-  it('selects parcels by tier: new, out for delivery 5 min, open 15 min, stale daily, recent terminal daily, old terminal never', async (t) => {
+  it('selects parcels by tier: new, out for delivery and open every 2 min, stale daily, recent final daily, old final never; final by stage, not latest code', async (t) => {
     const s = await migratedWithStores();
     t.after(() => s.schema.drop());
     const accountId = await withAccount(s);
     const at = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000);
     const day = 24 * 60;
-    const parcel = async (tracking: string, fields: { status_code?: string; status_label?: string; booked: number; synced: number | null; updated?: number }) => {
+    const parcel = async (tracking: string, fields: { status_code?: string; stage?: string; status_label?: string; booked: number; synced: number | null; updated?: number }) => {
       await s.schema.sql`
-        insert into shipments (postex_account_id, tracking_number, status_code, status_label, booked_at, last_synced_at, status_updated_at)
-        values (${accountId}, ${tracking}, ${fields.status_code ?? null}, ${fields.status_label ?? null}, ${at(fields.booked)},
+        insert into shipments (postex_account_id, tracking_number, status_code, stage, status_label, booked_at, last_synced_at, status_updated_at)
+        values (${accountId}, ${tracking}, ${fields.status_code ?? null}, ${fields.stage ?? null}, ${fields.status_label ?? null}, ${at(fields.booked)},
                 ${fields.synced === null ? null : at(fields.synced)}, ${fields.updated === undefined ? null : at(fields.updated)})
       `;
     };
@@ -218,9 +218,13 @@ describe('refresh tiers', { skip: skipWithoutDb }, () => {
     await parcel('delivered-recent-25h', { status_code: '0005', booked: 3 * day, synced: 25 * 60, updated: 2 * day });
     await parcel('delivered-recent-2h', { status_code: '0005', booked: 3 * day, synced: 120, updated: 2 * day });
     await parcel('returned-old', { status_code: '0006', booked: 30 * day, synced: 25 * 60, updated: 20 * day });
+    // On the way back, latest code a movement: still open, so on the 2-minute tier.
+    await parcel('returning-0032-3min', { status_code: '0032', stage: 'returning', booked: day, synced: 3 });
+    // Delivered with a movement code after it: final by its stage, so only the daily re-read.
+    await parcel('delivered-moved-2h', { status_code: '0035', stage: 'delivered', booked: 3 * day, synced: 120, updated: 2 * day });
 
     const due = (await dueForRefresh(s.schema.sql, accountId, NOW)).map((p) => p.trackingNumber).sort();
-    assert.deepEqual(due, ['attempted-6min', 'delivered-recent-25h', 'never-synced', 'ofd-6min', 'open-16min', 'stale-25h']);
+    assert.deepEqual(due, ['attempted-6min', 'delivered-recent-25h', 'never-synced', 'ofd-3min', 'ofd-6min', 'open-10min', 'open-16min', 'returning-0032-3min', 'stale-25h']);
   });
 });
 
@@ -335,8 +339,8 @@ describe('postex:sync links parcels to orders and moves their stock', { skip: sk
 });
 
 describe('the job', { skip: skipWithoutDb }, () => {
-  it('is registered as postex:sync every 15 minutes on the quarter hour, hourly overnight, and refuses to run with no account configured', async (t) => {
-    assert.deepEqual(jobs.find((j) => j.name === POSTEX_JOB)?.schedule, { everyMs: 15 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT });
+  it('is registered as postex:sync every 2 minutes around the clock, and refuses to run with no account configured', async (t) => {
+    assert.deepEqual(jobs.find((j) => j.name === POSTEX_JOB)?.schedule, { everyMs: SYNC_EVERY_MS, alignToClock: true });
     const s = await migratedWithStores();
     t.after(() => s.schema.drop());
     await assert.rejects(configuredPostexAccounts(s.schema.sql), /No PostEx account is ready to sync/);

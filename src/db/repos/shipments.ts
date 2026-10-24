@@ -1,4 +1,4 @@
-import { canonicalOrder } from '../../domain/order-state.js';
+import { FINAL_STAGES, canonicalOrder, parcelStage } from '../../domain/order-state.js';
 import {
   POSTEX_STATUS_CODES,
   type Shipment,
@@ -118,6 +118,7 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
   }));
   const ordered = canonicalOrder(events);
   const latest = ordered.at(-1) ?? null;
+  const stage = parcelStage(events);
   const attempts = ordered.filter((e) => e.code === '0013');
   const lastAttempt = attempts.at(-1);
   const flags = [
@@ -132,18 +133,38 @@ export const refreshDerived = async (db: Db, shipmentId: string): Promise<boolea
     update shipments set
       status_code = ${latest?.code ?? null},
       status_message = ${latest?.message ?? null},
+      stage = ${stage},
       attempts_count = ${attempts.length},
       last_failure_reason = ${lastAttempt ? failureReason(lastAttempt.message) : null},
       flags = ${flags}::text[],
       stock_pending = true,
       accounting_pending = true
     where id = ${shipmentId}
-      and (status_code, status_message, attempts_count, last_failure_reason, flags) is distinct from
-          (${latest?.code ?? null}::text, ${latest?.message ?? null}::text, ${attempts.length}::int,
+      and (status_code, status_message, stage, attempts_count, last_failure_reason, flags) is distinct from
+          (${latest?.code ?? null}::text, ${latest?.message ?? null}::text, ${stage}::text, ${attempts.length}::int,
            ${lastAttempt ? failureReason(lastAttempt.message) : null}::text, ${flags}::text[])
     returning id
   `;
   return updated.length > 0;
+};
+
+/**
+ * Derives the stage of every parcel stored before `shipments.stage` existed (or of one account's).
+ * Nothing else changes for them: their history is what it was, so their stock and postings are
+ * already right. Returns how many were filled in; a second call finds none.
+ */
+export const fillMissingStages = async (db: Db, postexAccountId?: string): Promise<number> => {
+  const ids = await db<{ id: string }[]>`
+    select id from shipments where stage is null ${postexAccountId ? db`and postex_account_id = ${postexAccountId}` : db``} order by id
+  `;
+  for (const { id } of ids) {
+    const events = await db<{ code: string; message: string; occurred_at: Date | null }[]>`
+      select code, message, occurred_at from shipment_events where shipment_id = ${id}
+    `;
+    const stage = parcelStage(events.map((e) => ({ code: e.code, message: e.message, occurredAt: e.occurred_at, known: Object.hasOwn(POSTEX_STATUS_CODES, e.code) })));
+    await db`update shipments set stage = ${stage} where id = ${id} and stage is null`;
+  }
+  return ids.length;
 };
 
 /** Parcels, matched or not, whose postings the accounting pass has not yet brought in line. */
@@ -196,6 +217,13 @@ export const DEFAULT_TIERS: RefreshTiers = {
  * - delivered, returned or cancelled in the last 7 days: daily, for late fee corrections;
  * - older terminal parcels: never.
  */
+/**
+ * Whether PostEx will move the parcel again on its own, by its stage rather than its latest code:
+ * a delivered or returned parcel can still carry a movement code after the one that decided it.
+ * A parcel not yet given a stage falls back to its latest code.
+ */
+const finalSql = (db: Db) => db`coalesce(stage = any(${[...FINAL_STAGES]}::text[]), status_code = any(${[...TERMINAL_CODES]}::text[]), false)`;
+
 export const dueForRefresh = async (
   db: Db,
   postexAccountId: string,
@@ -203,20 +231,21 @@ export const dueForRefresh = async (
   tiers: RefreshTiers = DEFAULT_TIERS,
 ): Promise<Array<{ id: string; trackingNumber: string }>> => {
   const ago = (ms: number) => new Date(now.getTime() - ms);
+  const final = finalSql(db);
   const rows = await db<{ id: string; tracking_number: string }[]>`
     select id, tracking_number from shipments
     where postex_account_id = ${postexAccountId}
       and (
         last_synced_at is null
         or (
-          status_code = any(${[...TERMINAL_CODES]}::text[])
+          ${final}
           and coalesce(status_updated_at, delivered_at, updated_at) > ${ago(tiers.terminalWatchMs)}
           and last_synced_at <= ${ago(tiers.dailyMs)}
         )
         or (
-          (status_code is null or not (status_code = any(${[...TERMINAL_CODES]}::text[])))
+          not ${final}
           and last_synced_at <= case
-            when status_code = '0013' or status_label ilike '%out for delivery%' then ${ago(tiers.activeMs)}::timestamptz
+            when stage = 'attempted' or status_code in ('0013', '0004') or status_label ilike '%out for delivery%' then ${ago(tiers.activeMs)}::timestamptz
             when booked_at < ${ago(tiers.staleAfterMs)} then ${ago(tiers.dailyMs)}::timestamptz
             else ${ago(tiers.defaultMs)}::timestamptz
           end
@@ -235,8 +264,8 @@ export const activeParcels = async (db: Db, postexAccountIds: string[]): Promise
   const [row] = await db<{ n: number }[]>`
     select count(*)::int as n from shipments
     where postex_account_id = any(${postexAccountIds}::bigint[])
-      and (status_code is null or not (status_code = any(${[...TERMINAL_CODES]}::text[])))
-      and (status_code = '0013' or status_label ilike '%out for delivery%')
+      and not ${finalSql(db)}
+      and (stage = 'attempted' or status_code in ('0013', '0004') or status_label ilike '%out for delivery%')
   `;
   return row?.n ?? 0;
 };
@@ -245,7 +274,10 @@ export interface PostexTotals {
   account: string;
   parcels: number;
   delivered: number;
+  /** Back with us (0006). */
   returned: number;
+  /** Return started and still on its way back. */
+  returning: number;
   forwardFee: bigint;
   forwardTax: bigint;
   reversalFee: bigint;
@@ -254,15 +286,17 @@ export interface PostexTotals {
 
 /**
  * Per-account totals for parcels booked between two Karachi dates (inclusive), to reconcile
- * against PostEx's own figures. Delivered and returned go by the derived status code (`0005`,
- * `0006`); fees and their 16% tax are kept apart so either reading of "charges" can be compared.
+ * against PostEx's own figures. Delivered, returning and returned go by the parcel's stage (its
+ * whole history, not its latest code); fees and their 16% tax are kept apart so either reading of
+ * "charges" can be compared.
  */
 export const postexTotals = async (db: Db, from: string, to: string): Promise<PostexTotals[]> => {
   const inWindow = db`(s.booked_at at time zone 'Asia/Karachi')::date between ${from}::date and ${to}::date`;
-  const parcels = await db<{ account: string; parcels: number; delivered: number; returned: number }[]>`
+  const parcels = await db<{ account: string; parcels: number; delivered: number; returned: number; returning: number }[]>`
     select a.key as account, count(*)::int as parcels,
-      count(*) filter (where s.status_code = '0005')::int as delivered,
-      count(*) filter (where s.status_code = '0006')::int as returned
+      count(*) filter (where s.stage = 'delivered')::int as delivered,
+      count(*) filter (where s.stage = 'returned')::int as returned,
+      count(*) filter (where s.stage = 'returning')::int as returning
     from shipments s join postex_accounts a on a.id = s.postex_account_id
     where ${inWindow}
     group by a.key order by a.key

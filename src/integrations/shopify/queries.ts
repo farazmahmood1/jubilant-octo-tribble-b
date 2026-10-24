@@ -74,16 +74,29 @@ const LINE_FIELDS = `
   discountedTotalSet { ${MONEY} }
 `;
 
+/**
+ * Refunds and returns come with every order (read_orders, read_returns), so Shopify's side of a
+ * return is synced like the rest of the order. A cancellation is a refund too: its lines say
+ * whether Shopify restocked the units. At most 5 refunds and 3 returns per order are read, 20 lines
+ * each: more than any order here has, and it keeps a page of 50 orders near cost 510 of Shopify's
+ * 1,000 (measured October 2026).
+ */
+const REFUND_FIELDS = `id createdAt totalRefundedSet { ${MONEY} } refundLineItems(first: 20) { nodes { quantity restockType restocked lineItem { id } subtotalSet { ${MONEY} } } }`;
+const RETURN_FIELDS = `id name status createdAt closedAt returnLineItems(first: 20) { nodes { quantity returnReason ... on ReturnLineItem { fulfillmentLineItem { lineItem { id } } } } }`;
+
 const ORDER_FIELDS = `
   id name note createdAt updatedAt cancelledAt cancelReason
-  displayFinancialStatus displayFulfillmentStatus
+  displayFinancialStatus displayFulfillmentStatus returnStatus
   tags discountCodes
   subtotalPriceSet { ${MONEY} }
   totalDiscountsSet { ${MONEY} }
   totalShippingPriceSet { ${MONEY} }
   totalTaxSet { ${MONEY} }
   totalPriceSet { ${MONEY} }
+  totalRefundedSet { ${MONEY} }
   shippingAddress { name phone address1 address2 city province zip countryCodeV2 }
+  refunds(first: 5) { ${REFUND_FIELDS} }
+  returns(first: 3) { nodes { ${RETURN_FIELDS} } }
   lineItems(first: ${NESTED_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { ${LINE_FIELDS} } }
 `;
 

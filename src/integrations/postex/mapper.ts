@@ -11,7 +11,14 @@ import { parsePostexLocal } from '../../lib/time.js';
  * which cannot be stored or looked up at all.
  */
 
-/** The history codes that drive behaviour (CLAUDE.md). Anything else is kept and flagged. */
+/**
+ * The history codes we know (CLAUDE.md). Anything else is kept and flagged. The first group
+ * drives behaviour; the second are the routine movements PostEx reports on the way out and on the
+ * way back, which decide nothing (like `0008`, they only move a parcel still `booked` to
+ * `in_transit`) but are named so they are not reported as unknown. The return leg is `0039`
+ * waiting for return, `0037` return to a city, `0032` en route to the merchant warehouse: `0040`
+ * and `0006` are what decide that a parcel is returning and returned.
+ */
 export const POSTEX_STATUS_CODES = {
   '0002': 'cancelled_by_merchant',
   '0005': 'delivered',
@@ -19,12 +26,23 @@ export const POSTEX_STATUS_CODES = {
   '0008': 'under_review',
   '0013': 'attempt_made',
   '0040': 'return_initiated',
+  '0001': 'at_merchant_warehouse',
+  '0036': 'at_merchant_warehouse',
+  '0031': 'departed_merchant_warehouse',
+  '0003': 'received_at_warehouse',
+  '0033': 'departed_to_next_stop',
+  '0035': 'arrived_at_hub',
+  '0038': 'waiting_for_delivery',
+  '0004': 'out_for_delivery',
+  '0039': 'waiting_for_return',
+  '0037': 'return_to_city',
+  '0032': 'returning_to_merchant_warehouse',
 } as const;
 
 export type KnownStatusCode = keyof typeof POSTEX_STATUS_CODES;
 
-/** Reasons PostEx gives on a `0013` attempt: refused, customer not available, incomplete address, wants to open. */
-export type FailureReason = 'RFD' | 'CNA' | 'ICA' | 'OPN';
+/** Reasons PostEx gives on a `0013` attempt: refused, customer not available, incomplete address, wants to open, hold on consignee request, payment not available. */
+export type FailureReason = 'RFD' | 'CNA' | 'ICA' | 'OPN' | 'HCR' | 'PNA';
 
 export type ShipmentFlag =
   | 'unknown_status'
@@ -192,9 +210,9 @@ export const toShipmentEvents = (raw: unknown): ShipmentEvent[] => {
   return eventsWithFlags(parcel, new Set());
 };
 
-const FAILURE_REASON = /\b(RFD|CNA|ICA|OPN)\b/;
+const FAILURE_REASON = /\b(RFD|CNA|ICA|OPN|HCR|PNA)\b/;
 
-/** The reason on a `0013` attempt message: one of the four codes, else PostEx's own text. */
+/** The reason on a `0013` attempt message: one of the six codes, else PostEx's own text. */
 export const failureReason = (message: string): FailureReason | string | null =>
   (FAILURE_REASON.exec(message)?.[1] as FailureReason | undefined) ?? (message || null);
 

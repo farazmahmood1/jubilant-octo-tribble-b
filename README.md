@@ -9,21 +9,22 @@ and serves the dashboard from its own PostgreSQL database on Neon.
 ```bash
 npm install
 cp .env.example .env     # values already in the repo-root .env are picked up automatically
-npm run dev              # http://localhost:4000, restarts on change
+npm run dev              # http://localhost:5050, restarts on change
 npm run verify           # read-only connection check for Neon, Shopify and PostEx
 ```
 
 | Script | What it does |
 | --- | --- |
-| `npm run dev` | Development server with reload |
+| `npm run dev` | The API and the background worker together, each with reload; the syncs and the reconciliation scan run every 2 minutes |
+| `npm run dev:api` | The API alone, with reload (no syncs, no reconciliation scan) |
 | `npm run build` / `npm start` | Clean `dist/`, compile, copy migrations into it; then run it (used on Render) |
 | `npm run typecheck` | TypeScript, no emit |
 | `npm run verify` | Checks every configured integration, read-only |
 | `npm test` / `npm run test:watch` | `node:test` over `src/**/*.test.ts`, once or on change |
-| `npm run migrate` | Applies pending migrations from `src/db/migrations/`; refuses if an applied file changed |
+| `npm run migrate` | Applies pending migrations from `src/db/migrations/`; refuses if an applied file changed (line endings do not count: a file is checksummed in its LF form, and a CRLF checksum recorded from a Windows checkout is accepted) |
 | `npm run migrate:status` | Applied, pending, changed or missing, per migration; exits 1 on changed or missing |
 | `npm run migrate:prod` | Same as `migrate`, from the compiled build, without `tsx` |
-| `npm run dev:worker` / `npm run start:worker` | Background worker (scheduler) from source with reload, or from `dist/` (Render worker) |
+| `npm run dev:worker` / `npm run start:worker` | Background worker (scheduler) alone, from source with reload, or from `dist/` (Render worker). `npm run dev` already starts it |
 | `npm run job -- <name>` | Runs one job once and exits: 0 succeeded, 1 failed, 2 unknown job, 3 already running elsewhere |
 | `npm run postex:totals -- <from> <to>` | PostEx parcels, delivered, returned and charges per account for a Karachi booking window |
 | `npm run seed` | Upserts `stores` and `postex_accounts` from config; safe to repeat |
@@ -161,10 +162,58 @@ and `stock_quants` is kept by a trigger on the ledger and can be recomputed with
 `rebuildQuants()`. A parcel's units follow its PostEx history: booked leaves the warehouse for in
 transit; delivered goes to customer (marketing for a PR order); return started or returned (0040,
 0006) goes to returning; cancelled by merchant (0002) goes back to the warehouse. 0006 moves
-nothing further: only a person checking the parcel in (`checkInReturn`, restocked or damaged)
-does, and `returnsAwaitingCheckIn()` lists the parcels PostEx has returned that nobody has
-checked in. Counts and corrections go through `recordAdjustment()`, against the adjustment
-location, and are audited. Order lines with no catalogue variant cannot move and are queued.
+nothing further: only a person checking the parcel in (`checkInReturn`: restocked, damaged, or
+`mixed`, split per product in `return_check_in_lines`) does, and `returnsAwaitingCheckIn()` lists
+the parcels PostEx has returned that nobody has checked in. A parcel can be checked in as soon as
+its stage is `returning`. Counts and corrections go through `recordAdjustment()`, against the
+adjustment location, and are audited. Order lines with no catalogue variant cannot move and are
+queued.
+
+**A parcel's stage** (`shipments.stage`, migration 0022) is derived from its whole history by the
+same replay as the order state (`parcelStage` in `domain/order-state.ts`) and written with
+`status_code` by `refreshDerived`. Never test `status_code` for an outcome: it is only the latest
+step, and after a return starts PostEx keeps sending movement codes (0039, 0037, 0035, 0032), so
+most parcels on their way back have a latest code that is neither 0040 nor 0006. Every report,
+the returns screens, the desk's refusal history, the reconciliation rules and the refresh tiers
+read the stage. `npm run migrate`, the boot and `postex:sync` fill it for parcels stored before it
+existed (`fillMissingStages`).
+
+## Returns and Shopify
+
+Restocking and cancelling are separate. **Checking a return in never cancels the Shopify order.**
+`syncCheckInToShopify` (`domain/shopify-returns.ts`) reads the order live from Shopify and, per
+product, over every parcel of the order:
+
+    gone     = ordered - still committed - already restocked by Shopify
+    add now  = min(units checked in as restocked, gone) - units the platform already added
+
+- *Still committed*: unfulfilled units of an order that is not cancelled. Shopify still counts them
+  on hand, so adding them would count them twice once the order is cancelled with restock. The
+  attempt is `pending` ("Needs Shopify" on the Returns page) until the order is cancelled.
+- *Already restocked by Shopify*: refund lines with `restocked: true` (a cancellation with restock
+  is restock type CANCEL), and RESTOCKED dispositions on Shopify returns. A cancellation without
+  restock (NO_RESTOCK) leaves the units gone, so they are added back.
+- *Already added by the platform*: every adjustment recorded in `shopify_writebacks`. With an
+  idempotency key per order, product and running total, and a transaction-scoped advisory lock per
+  order, a double click, a retry, the background re-check or two people at once add nothing twice.
+
+Damaged units are never added. A failure is `failed`, never `done`. `shopify:catchup` re-checks
+pending and failed attempts every 10 minutes (`writebacksToRecheck`), so cancelling the order in
+Shopify settles the return by itself; an unchanged answer writes no attempt row (only
+`shopify_writeback_checks`, migration 0023).
+
+**Cancel in Shopify** is its own action (`cancelShopifyOrderForReturn`,
+`POST /api/v1/stock/returns/:shipmentId/shopify-cancel`): only after check-in, only for an order
+with units still committed, restocking only if some came back in good condition (damaged ones are
+then taken off available), never refunding or notifying, audited (`shopify.order_cancel`).
+
+Shopify's own refunds and returns are synced with every order (`shopify_refunds`,
+`shopify_refund_lines`, `shopify_returns`, `orders.refunded_paisa` / `return_status`), keyed on
+Shopify's ids. `GET /api/v1/reconciliation/returns` puts PostEx, the warehouse and Shopify side by
+side per order and parcel and names what disagrees (`domain/returns-reconciliation.ts`);
+`POST /api/v1/reconciliation/returns/resync` re-reads an order from Shopify and/or a parcel from
+PostEx through the syncs' own upserts. An order Shopify no longer has is kept and queued
+(`shopify_order_missing`), never deleted.
 
 ## Reconciliation queue
 
@@ -183,8 +232,9 @@ API (signed in): `GET /api/v1/reconciliation/items?status=&kind=&store=&before=&
 `orderNumber`. A link updates the parcel, closes its items, moves its stock and sets its order's
 state in one transaction.
 
-Stock API: `GET /api/v1/stock/returns-awaiting`, `POST /api/v1/stock/returns/:shipmentId/check-in`
-(`restocked` or `damaged`), `GET /api/v1/stock/locations`, `GET /api/v1/stock/quants`,
+Stock API: `GET /api/v1/stock/returns-awaiting` (with `comingBack`), `POST /api/v1/stock/returns/:shipmentId/check-in`
+(`restocked`, `damaged`, or `mixed` with `lines`), `GET .../returns/:shipmentId/units`, `POST .../shopify-sync`,
+`POST .../shopify-cancel`, `GET /api/v1/stock/locations`, `GET /api/v1/stock/quants`,
 `GET /api/v1/stock/variants?search=`, `POST /api/v1/stock/adjustments`.
 
 **Matching prefixes.** `npm run match:report` prints, per PostEx account, the match rate against
@@ -475,7 +525,8 @@ payout) and its parcel, with a reversal carrying its original's origin so the tw
 | --- | --- |
 | `deliveredRevenue` | the Sales revenue account: delivered parcels and consignment sales only |
 | `pnl`, `netProfit` | income and expense accounts, optionally by month |
-| `returnRate`, `deliverySuccess` | parcels booked in the period, PR parcels excluded; returned ÷ delivered-or-returned; delivered ÷ final outcomes, and first-attempt share |
+| `sales` | orders placed in the period by derived state: PR and orders cancelled before anything shipped left out, the latter reported as `cancelled`; an order cancelled in Shopify after its parcel left still counts |
+| `returnRate`, `deliverySuccess` | parcels booked in the period, PR parcels excluded, by stage; returned (on the way back or back) ÷ delivered-or-returned; delivered ÷ outcomes, and first-attempt share |
 | `cashAwaitingPayout` | COD receivable per parcel at the end of the period, aged 0–7 / 8–14 / 15–30 / 31+ days since delivery; charges on parcels with no sale apart |
 | `profitPerParcel` | each parcel's own lines: revenue − goods − PostEx charges − marketing − write-off |
 | `breakdown` | the same lines by store (brand), month, city, partner, influencer (via `influencer_codes`) or the desk agent who confirmed the order; rows add up to the P&L |
@@ -490,10 +541,33 @@ API (signed in): `GET /api/v1/reports/breakdowns/:dimension?from=&to=&store=` an
 
 ## Worker schedule
 
+**Where no worker runs (Vercel), nothing syncs on its own.** A serverless function only runs while
+answering a request, so `index.worker.ts` never starts there. Three things run the due jobs instead,
+all through `runDueSyncs` (`jobs/status.ts`) with the same advisory locks and `sync_runs` rows,
+so any mix of them never runs a job twice side by side:
+
+1. **The open dashboard.** Every signed-in screen calls `POST /api/v1/sync/run` once a minute while
+   visible (`useLiveSync` in the frontend), and re-reads what is on screen when a sync has finished.
+   `GET /api/v1/sync/status` says how fresh Shopify and PostEx are; "Sync now" sends `{ now: true }`.
+2. **A cron**, for when nobody has it open: `GET|POST /internal/cron` with
+   `Authorization: Bearer <CRON_SECRET>`. Set `CRON_SECRET` in Vercel. Vercel Cron on Hobby only
+   runs daily, so either use Vercel Pro (`"crons": [{ "path": "/internal/cron", "schedule": "*/2 * * * *" }]`
+   in `vercel.json`, which sends the header itself) or a free external scheduler (cron-job.org,
+   every 2 minutes, with that header). `CRON_BUDGET_MS` (default 240 s) keeps a call under the
+   function limit; jobs stop at a batch boundary and resume from their cursors.
+3. **Shopify webhooks**, processed before the answer on Vercel (`inlineMs`), since work after it
+   may never run. None are registered yet: `webhook_events` is empty.
+
 Every Shopify and PostEx job runs every 2 minutes, around the clock (`SYNC_EVERY_MS` in
 `src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `postex:sync`,
 `reconciliation:scan` and `pr:detect`. `postex:payouts` stays daily. Neon therefore never gets to
 suspend its compute while the worker runs; that is the cost of the freshness (risk R3).
+
+`npm run dev` starts the worker with the API; in production the worker is its own Render service
+(`npm run start:worker`) and must be running, or nothing syncs. Job locks are Postgres advisory
+locks taken on a second, direct connection (`lockDb` in `src/db.ts`: `DATABASE_URL` with `-pooler`
+removed from the host). Behind Neon's pooler a lock taken by one statement is not released by the
+next, so it would stay held and the job would be skipped for good after its first run.
 
 ## Shopify webhooks
 
@@ -527,7 +601,8 @@ Tests sit next to the code as `*.test.ts` and run with `node:test` through `tsx`
 build step and no test framework dependency.
 
 Database tests run only when `DATABASE_URL_TEST` points at a scratch Postgres, and are skipped
-otherwise. Each test gets its own schema, dropped afterwards. Never point it at Neon; the helper
+otherwise. The scratch database must be UTF-8 (a Windows cluster defaults to WIN1252, and the
+migrations have non-ASCII text). Each test gets its own schema, dropped afterwards. Never point it at Neon; the helper
 refuses a `*.neon.tech` host.
 
 ```bash

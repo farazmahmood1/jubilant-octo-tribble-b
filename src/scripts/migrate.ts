@@ -8,6 +8,7 @@
 import { closeDb, db } from '../db.js';
 import { MigrationError, migrate, migrationStatus } from '../db/migrate.js';
 import { seed } from '../db/seed.js';
+import { fillMissingStages } from '../db/repos/shipments.js';
 
 const line = (label: string, detail: string) => console.log(`  ${label.padEnd(34)} ${detail}`);
 
@@ -35,6 +36,9 @@ const run = async (command: string): Promise<void> => {
   const applied = await migrate(sql);
   if (applied.length === 0) console.log('Nothing to migrate: the database is up to date');
   for (const file of applied) console.log(`Applied ${file.file}`);
+  // Derived columns a migration added are filled at once, not on the next sync (0022: shipments.stage).
+  const stages = await fillMissingStages(sql);
+  if (stages > 0) console.log(`Derived the stage of ${stages} parcel(s)`);
 };
 
 run(process.argv[2] ?? 'up')

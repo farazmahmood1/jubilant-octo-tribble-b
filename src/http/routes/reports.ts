@@ -127,6 +127,13 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
         deliveredRevenue: revenue,
         profit,
         returnRate: returns,
+        // The parcels behind the return rate: the same population and the same counts.
+        returns: {
+          parcels: delivery.counts.returned,
+          back: delivery.counts.returnedBack,
+          comingBack: delivery.counts.returning,
+          value: delivery.counts.returnedValue,
+        },
         deliverySuccess: delivery,
         cash,
         // The per-parcel rows are the report's own screen; the tile needs only the totals.

@@ -651,9 +651,9 @@ export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Prom
       memo: `PostEx return charge: ${p.tracking_number}`,
     });
 
-    // Damaged on check-in: the cost of what came back is written off.
+    // Damaged on check-in (all of it, or the damaged part of a split one): the cost of those units is written off.
     const [checkIn] = await tx<{ outcome: string; checked_in_at: Date }[]>`select outcome, checked_in_at from return_check_ins where shipment_id = ${shipmentId}`;
-    if (checkIn?.outcome === 'damaged' && p.placed_at) {
+    if (checkIn && checkIn.outcome !== 'restocked' && p.placed_at) {
       const damaged = await parcelCost(tx, shipmentId, p.placed_at, storeId, 'damaged');
       if (damaged !== null) {
         actions['writeOff'] = await settle(tx, {

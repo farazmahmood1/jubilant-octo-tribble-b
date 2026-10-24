@@ -29,6 +29,12 @@ export interface MigrationFile {
   file: string;
   sql: string;
   checksum: string;
+  /**
+   * Every checksum this same file may have been recorded under: the LF and CRLF forms of its
+   * text. A Windows checkout (git's autocrlf) and a Linux build of one commit differ only in line
+   * endings, and that is not an edit.
+   */
+  accepted: readonly string[];
 }
 
 interface AppliedRow {
@@ -49,6 +55,13 @@ export interface MigrationStatus {
 
 export const checksum = (text: string): string => createHash('sha256').update(text).digest('hex');
 
+/** The checksum a file is recorded under (its LF form), and the forms an earlier run may have recorded. */
+export const checksumsOf = (text: string): { checksum: string; accepted: string[] } => {
+  const lf = text.replace(/\r\n/g, '\n');
+  const forms = [checksum(lf), checksum(lf.replace(/\n/g, '\r\n'))];
+  return { checksum: forms[0]!, accepted: forms };
+};
+
 /** Every `.sql` file in the directory, in version order. A misnamed or duplicate file stops the run. */
 export const readMigrations = (dir: string = MIGRATIONS_DIR): MigrationFile[] => {
   if (!existsSync(dir)) throw new MigrationError(`Migrations directory not found: ${dir}`);
@@ -62,7 +75,7 @@ export const readMigrations = (dir: string = MIGRATIONS_DIR): MigrationFile[] =>
       throw new MigrationError(`Two migrations share version ${version}: ${file}`);
     }
     const sql = readFileSync(resolve(dir, file), 'utf8');
-    files.push({ version, name, file, sql, checksum: checksum(sql) });
+    files.push({ version, name, file, sql, ...checksumsOf(sql) });
   }
   return files;
 };
@@ -103,7 +116,7 @@ export const migrationStatus = async (sql: Sql, dir: string = MIGRATIONS_DIR): P
   const status: MigrationStatus[] = files.map((file) => {
     const row = applied.get(file.version);
     if (!row) return { version: file.version, name: file.name, state: 'pending' };
-    const state = row.checksum === file.checksum ? 'applied' : 'changed';
+    const state = file.accepted.includes(row.checksum) ? 'applied' : 'changed';
     return { version: file.version, name: file.name, state, appliedAt: row.applied_at };
   });
   for (const row of applied.values()) {
@@ -144,7 +157,7 @@ export const migrate = async (sql: Sql, dir: string = MIGRATIONS_DIR): Promise<M
       await tx`select pg_advisory_xact_lock(${LOCK_KEY})`;
       const [existing] = await tx<AppliedRow[]>`select version, name, checksum, applied_at from schema_migrations where version = ${file.version}`;
       if (existing) {
-        if (existing.checksum !== file.checksum) assertConsistent([{ version: file.version, name: file.name, state: 'changed' }]);
+        if (!file.accepted.includes(existing.checksum)) assertConsistent([{ version: file.version, name: file.name, state: 'changed' }]);
         return false;
       }
       const startedAt = Date.now();

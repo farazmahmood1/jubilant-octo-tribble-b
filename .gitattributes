@@ -1,0 +1,2 @@
+# Migrations are checksummed: keep their line endings the same on every checkout (Windows and the Linux build).
+*.sql text eol=lf

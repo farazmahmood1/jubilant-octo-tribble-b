@@ -1,5 +1,5 @@
 import type { AddressInput } from '../../db/repos/customers.js';
-import type { OrderLineInput } from '../../db/repos/orders.js';
+import type { OrderLineInput, RefundInput, ReturnInput } from '../../db/repos/orders.js';
 import { type Paisa, fromRupeeString } from '../../lib/money.js';
 
 /**
@@ -67,6 +67,12 @@ export interface ShopifyOrderNode {
   totalShippingPriceSet: MoneySet | null;
   totalTaxSet: MoneySet | null;
   totalPriceSet: MoneySet;
+  /** Shopify's Order.returnStatus (NO_RETURN, RETURN_REQUESTED, IN_PROGRESS, RETURNED, …). */
+  returnStatus?: string | null;
+  totalRefundedSet?: MoneySet | null;
+  /** Every refund, a cancellation included: its lines say whether the units were restocked. */
+  refunds?: ShopifyRefundNode[];
+  returns?: { nodes: ShopifyReturnNode[] } | null;
   customer: { id: string; firstName: string | null; lastName: string | null; phone: string | null } | null;
   shippingAddress: {
     name: string | null;
@@ -79,6 +85,22 @@ export interface ShopifyOrderNode {
     countryCodeV2: string | null;
   } | null;
   lineItems: Connection<ShopifyLineNode>;
+}
+
+export interface ShopifyRefundNode {
+  id: string;
+  createdAt: string;
+  totalRefundedSet: MoneySet | null;
+  refundLineItems: { nodes: Array<{ quantity: number; restockType: string; restocked: boolean; lineItem: { id: string } | null; subtotalSet: MoneySet | null }> };
+}
+
+export interface ShopifyReturnNode {
+  id: string;
+  name: string | null;
+  status: string;
+  createdAt: string | null;
+  closedAt: string | null;
+  returnLineItems: { nodes: Array<{ quantity: number; returnReason?: string | null; fulfillmentLineItem?: { lineItem: { id: string } | null } | null }> };
 }
 
 export class ShopifyMappingError extends Error {
@@ -183,7 +205,11 @@ export interface MappedOrder {
     tags: string[];
     discountCodes: string[];
     postexTrackingNumbers: string[];
+    refunded: Paisa;
+    returnStatus: string | null;
   };
+  refunds: RefundInput[];
+  returns: ReturnInput[];
   /** Lines with the Shopify variant id still to be resolved to our variant row. */
   lines: Array<Omit<OrderLineInput, 'variantId'> & { shopifyVariantId: bigint | null }>;
 }
@@ -250,7 +276,39 @@ export const mapOrder = (node: ShopifyOrderNode, lineNodes: ShopifyLineNode[] = 
       tags,
       discountCodes: node.discountCodes,
       postexTrackingNumbers: postexTrackingFromNote(node.note),
+      refunded: money(node.totalRefundedSet, 'total refunded'),
+      returnStatus: node.returnStatus ?? null,
     },
+    refunds: (node.refunds ?? []).map((refund) => ({
+      shopifyRefundId: parseGid(refund.id, 'Refund'),
+      refundedAt: new Date(refund.createdAt),
+      amount: money(refund.totalRefundedSet, `refund ${refund.id}`),
+      lines: refund.refundLineItems.nodes.flatMap((line) =>
+        line.lineItem
+          ? [
+              {
+                shopifyLineItemId: parseGid(line.lineItem.id, 'LineItem'),
+                qty: line.quantity,
+                restockType: line.restockType,
+                restocked: line.restocked,
+                amount: money(line.subtotalSet, `refund ${refund.id} line`),
+              },
+            ]
+          : [],
+      ),
+    })),
+    returns: (node.returns?.nodes ?? []).map((ret) => ({
+      shopifyReturnId: parseGid(ret.id, 'Return'),
+      name: ret.name,
+      status: ret.status,
+      openedAt: ret.createdAt ? new Date(ret.createdAt) : null,
+      closedAt: ret.closedAt ? new Date(ret.closedAt) : null,
+      lines: ret.returnLineItems.nodes.map((line) => ({
+        lineItemId: line.fulfillmentLineItem?.lineItem ? String(parseGid(line.fulfillmentLineItem.lineItem.id, 'LineItem')) : null,
+        qty: line.quantity,
+        reason: line.returnReason ?? null,
+      })),
+    })),
     lines: lineNodes.map((line) => ({
       lineKey: `shopify:${parseGid(line.id, 'LineItem')}`,
       shopifyVariantId: line.variant ? parseGid(line.variant.id, 'ProductVariant') : null,

@@ -1,4 +1,5 @@
 import { tagWords } from '../db/repos/confirmations.js';
+import { STAGE_SQL } from '../db/repos/parcels.js';
 import type { Db } from '../db/repos/upsert.js';
 import { normalizePk } from '../lib/phone.js';
 import { callLink, whatsappLink } from './confirmation.js';
@@ -77,8 +78,8 @@ export const deskQueue = async (db: Db, f: QueueFilter): Promise<{ rows: QueueRo
     left join customers cu on cu.id = o.customer_id
     left join addresses ad on ad.id = o.shipping_address_id
     left join lateral (
-      select count(*) filter (where p.status_code = '0005')::int as delivered,
-             count(*) filter (where p.status_code in ('0040', '0006'))::int as returned
+      select count(*) filter (where p.stage = 'delivered')::int as delivered,
+             count(*) filter (where p.stage in ('returning', 'returned'))::int as returned
       from (${parcelsOfPhone(db, db`cu.phone_e164`)}) p
       where cu.phone_e164 is not null and p.order_id is distinct from o.id and not shipment_is_pr(p.id)
     ) h on true
@@ -207,9 +208,12 @@ const AWAITING: readonly OrderState[] = ['placed', 'confirmed', 'ready_to_book']
 
 export type ParcelOutcome = 'delivered' | 'refused' | 'cancelled' | 'in_flight';
 
-/** What a parcel's PostEx status says happened, for the history: settled one way, or still out. */
-export const parcelOutcome = (code: string | null): ParcelOutcome =>
-  code === '0005' ? 'delivered' : code === '0040' || code === '0006' ? 'refused' : code === '0002' ? 'cancelled' : 'in_flight';
+/**
+ * What a parcel's stage says happened, for the history: settled one way, or still out. A parcel on
+ * its way back was refused as much as one already back, whatever movement PostEx reported last.
+ */
+export const parcelOutcome = (stage: string | null): ParcelOutcome =>
+  stage === 'delivered' ? 'delivered' : stage === 'returning' || stage === 'returned' ? 'refused' : stage === 'cancelled' ? 'cancelled' : 'in_flight';
 
 /**
  * Every parcel sent to a phone number: the ones PostEx holds the number on, and the ones of orders
@@ -217,9 +221,9 @@ export const parcelOutcome = (code: string | null): ParcelOutcome =>
  * or a column of the outer query.
  */
 const parcelsOfPhone = (db: Db, phone: ReturnType<Db>) => db`
-  select s.id, s.order_id, s.status_code from shipments s where s.customer_phone = ${phone}
+  select s.id, s.order_id, ${db.unsafe(STAGE_SQL)} as stage from shipments s where s.customer_phone = ${phone}
   union
-  select s.id, s.order_id, s.status_code from shipments s
+  select s.id, s.order_id, ${db.unsafe(STAGE_SQL)} as stage from shipments s
   join orders o3 on o3.id = s.order_id join customers c3 on c3.id = o3.customer_id
   where c3.phone_e164 = ${phone}
 `;
@@ -246,14 +250,14 @@ export const customerHistory = async (db: Db, rawPhone: string, opts: { city?: s
   const count = (states: readonly (OrderState | null)[]) => orders.filter((o) => o.channel === 'online' && states.includes(o.state)).length;
   // Outcomes come from the parcels, so a delivery or a refusal counts whether or not its PostEx
   // parcel was ever linked to a Shopify order. PR packages are not the customer's to refuse.
-  const parcels = await db<{ id: string; order_id: string | null; tracking_number: string; account: string; booked_at: Date | null; cod: string | null; status_code: string | null; city: string | null }[]>`
-    select s.id, s.order_id, s.tracking_number, a.key as account, s.booked_at, s.cod_amount_paisa::text as cod, s.status_code, s.city
+  const parcels = await db<{ id: string; order_id: string | null; tracking_number: string; account: string; booked_at: Date | null; cod: string | null; status_code: string | null; stage: string; city: string | null }[]>`
+    select s.id, s.order_id, s.tracking_number, a.key as account, s.booked_at, s.cod_amount_paisa::text as cod, s.status_code, p.stage, s.city
     from (${parcelsOfPhone(db, db`${phone}`)}) p
     join shipments s on s.id = p.id join postex_accounts a on a.id = s.postex_account_id
     where not shipment_is_pr(s.id) ${opts.excludeOrderId ? db`and s.order_id is distinct from ${opts.excludeOrderId}` : db``}
     order by s.booked_at desc nulls last, s.id desc
   `;
-  const outcomes = parcels.map((p) => parcelOutcome(p.status_code));
+  const outcomes = parcels.map((p) => parcelOutcome(p.stage));
   const delivered = outcomes.filter((o) => o === 'delivered').length;
   const refused = outcomes.filter((o) => o === 'refused').length;
   const unlinked = parcels.filter((p) => p.order_id === null);
@@ -261,8 +265,8 @@ export const customerHistory = async (db: Db, rawPhone: string, opts: { city?: s
   if (opts.city?.trim()) {
     // Every parcel to the city, by PostEx's city or the order's address, unmatched parcels too.
     const [row] = await db<{ delivered: number; returned: number }[]>`
-      select count(*) filter (where s.status_code = '0005')::int as delivered,
-             count(*) filter (where s.status_code in ('0040', '0006'))::int as returned
+      select count(*) filter (where ${db.unsafe(STAGE_SQL)} = 'delivered')::int as delivered,
+             count(*) filter (where ${db.unsafe(STAGE_SQL)} in ('returning', 'returned'))::int as returned
       from shipments s
       left join orders o on o.id = s.order_id left join addresses ad on ad.id = o.shipping_address_id
       where (lower(trim(ad.city)) = lower(trim(${opts.city})) or lower(trim(s.city)) = lower(trim(${opts.city})))
@@ -281,7 +285,7 @@ export const customerHistory = async (db: Db, rawPhone: string, opts: { city?: s
       bookedAt: p.booked_at,
       codPaisa: p.cod,
       statusCode: p.status_code,
-      outcome: parcelOutcome(p.status_code),
+      outcome: parcelOutcome(p.stage),
       city: p.city,
     })),
     counts: {

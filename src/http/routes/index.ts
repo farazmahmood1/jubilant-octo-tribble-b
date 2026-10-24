@@ -19,6 +19,7 @@ import { reconciliationRouter } from './reconciliation.js';
 import { reportsRouter } from './reports.js';
 import { settingsRouter } from './settings.js';
 import { type StockRouterOptions, stockRouter } from './stock.js';
+import { syncRouter } from './sync.js';
 import { usersRouter } from './users.js';
 
 export const createApiRouter = (getSql: SqlProvider, options: { confirmations?: ConfirmationsOptions; stock?: StockRouterOptions } = {}): Router => {
@@ -35,6 +36,7 @@ export const createApiRouter = (getSql: SqlProvider, options: { confirmations?: 
   apiRouter.use(authorize);
   apiRouter.use(stripPii);
   apiRouter.use(integrationsRouter);
+  apiRouter.use(syncRouter(getSql));
   apiRouter.use(usersRouter(getSql));
   apiRouter.use(reconciliationRouter(getSql));
   apiRouter.use(stockRouter(getSql, options.stock));

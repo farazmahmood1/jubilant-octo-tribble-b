@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { FIXTURES_DIR, fixture } from '../../test/fixtures.js';
-import { PostexMappingError, toCharges, toPayout, toShipment, toShipmentEvents } from './mapper.js';
+import { PostexMappingError, failureReason, toCharges, toPayout, toShipment, toShipmentEvents } from './mapper.js';
 
 interface Envelope<T> {
   statusCode: string;
@@ -117,6 +117,26 @@ describe('toShipment', () => {
   });
 });
 
+describe('failureReason', () => {
+  it('reads each of the six abbreviations PostEx puts on a failed attempt', () => {
+    for (const [message, code] of [
+      ['Attempt Made: RFD(REFUSED TO RECEIVE)', 'RFD'],
+      ['Attempt Made: CNA(CUSTOMER NOT AVAILABLE)', 'CNA'],
+      ['Attempt Made: ICA(INCOMPLETE ADDRESS)', 'ICA'],
+      ['Attempt Made: OPN(CONSIGNEE WANTS TO OPEN PARCEL)', 'OPN'],
+      ['Attempt Made: HCR(HOLD ON CONSIGNEE REQUEST)', 'HCR'],
+      ['Attempt Made: PNA(PAYMENT NOT AVAILABLE)', 'PNA'],
+    ] as const) {
+      assert.equal(failureReason(message), code);
+    }
+  });
+
+  it('keeps PostEx\'s own text for a reason it has no abbreviation for, and null for no text', () => {
+    assert.equal(failureReason('Attempt Made: XYZ(SOMETHING NEW)'), 'Attempt Made: XYZ(SOMETHING NEW)');
+    assert.equal(failureReason(''), null);
+  });
+});
+
 describe('toShipmentEvents', () => {
   it('returns every history step oldest first, with code, message and Karachi time', () => {
     assert.deepEqual(toShipmentEvents(dist('postex-track-order-returned')), [
@@ -135,6 +155,13 @@ describe('toShipmentEvents', () => {
   it('keeps an unknown code, marked not known', () => {
     const events = toShipmentEvents(dist('postex-track-order-unknown-status'));
     assert.deepEqual(events.map((e) => [e.code, e.known]), [['0013', true], ['0099', false]]);
+  });
+
+  it('knows the routine movement and return-leg codes, so they are not reported as unknown', () => {
+    const step = (code: string) => ({ code, message: 'Moving', updatedAt: '2026-10-12 14:18:00' });
+    const codes = ['0001', '0036', '0031', '0003', '0033', '0035', '0038', '0004', '0039', '0037', '0032'];
+    const events = toShipmentEvents({ trackingNumber: '1', transactionStatusHistory: codes.map(step) });
+    assert.deepEqual(events.map((e) => e.known), codes.map(() => true));
   });
 
   it('reads the short field names in CLAUDE.md the same as the live API names', () => {

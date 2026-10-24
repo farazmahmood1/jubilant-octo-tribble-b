@@ -23,7 +23,7 @@ describe('order funnel', { skip: skipWithoutDb }, () => {
     if (o.channel === 'consignment') await s.schema.sql`update orders set channel = 'consignment', source = 'consignment', shopify_order_id = null where id = ${id}`;
     if (o.booked) {
       const [account] = await s.schema.sql<{ id: string }[]>`
-        insert into postex_accounts (key, label, store_id) values (${`acc-${key}`}, ${key}, ${store}) returning id
+        insert into postex_accounts (key, label, store_id) values (${`acc_${key.replaceAll('-', '_')}`}, ${key}, ${store}) returning id
       `;
       await parcel(s.schema.sql, { accountId: account!.id, orderId: id });
     }
@@ -64,8 +64,8 @@ describe('order funnel', { skip: skipWithoutDb }, () => {
       // Moving, failed, delivered, returning and returned: the cancelled parcel never moved.
       inTransit: 5,
       delivered: 1,
-      // A parcel still on its way back is not returned yet.
-      returned: 1,
+      // A parcel on its way back is returned already, as in the return rate: the sale is lost.
+      returned: 2,
     });
     assert.ok(funnel.placed >= funnel.confirmed && funnel.confirmed >= funnel.booked && funnel.booked >= funnel.inTransit);
     assert.ok(funnel.inTransit >= funnel.delivered + funnel.returned);

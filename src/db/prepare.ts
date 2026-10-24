@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { db } from '../db.js';
 import { logger } from '../logger.js';
 import { migrate } from './migrate.js';
+import { fillMissingStages } from './repos/shipments.js';
 import { seed } from './seed.js';
 
 /**
@@ -19,5 +20,6 @@ export const prepareDatabase = async (): Promise<void> => {
   }
   const applied = await migrate(sql);
   const seeded = await seed(sql);
-  logger.info({ migrationsApplied: applied.map((m) => m.file), seeded }, 'Database ready');
+  const stagesFilled = await fillMissingStages(sql);
+  logger.info({ migrationsApplied: applied.map((m) => m.file), seeded, stagesFilled }, 'Database ready');
 };

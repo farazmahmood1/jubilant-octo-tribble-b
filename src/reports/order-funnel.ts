@@ -10,8 +10,8 @@ import { type ReportFilter, placedWhere, prefix } from './filter.js';
  * - confirmed: the desk confirmed it, or a parcel was booked anyway
  * - booked: a parcel exists in PostEx, whatever became of it afterwards
  * - in transit: the parcel has moved (in transit, an attempt was made, delivered, or on its way back)
- * - delivered / returned: PostEx's final outcome. A parcel on its way back is not returned until it
- *   arrives, as in the return rate.
+ * - delivered / returned: PostEx's outcome. A parcel on its way back counts as returned, as in the
+ *   return rate: the sale is lost from the moment PostEx starts the return.
  *
  * Online orders only: PR packages and consignment sales never went through the confirmation desk.
  */
@@ -37,7 +37,7 @@ export const orderFunnelQuery = (db: Db, f: ReportFilter, explain = false) =>
            count(*) filter (where has_parcel)::int as booked,
            count(*) filter (where state in ('in_transit', 'failed', 'delivered', 'returning', 'returned_received'))::int as in_transit,
            count(*) filter (where state = 'delivered')::int as delivered,
-           count(*) filter (where state = 'returned_received')::int as returned
+           count(*) filter (where state in ('returning', 'returned_received'))::int as returned
     from cohort
   `;
 

@@ -1,3 +1,4 @@
+import { STAGE_SQL } from '../db/repos/parcels.js';
 import type { Db } from '../db/repos/upsert.js';
 import { type ReportFilter, bookedWhere, prefix } from './filter.js';
 
@@ -23,16 +24,18 @@ export interface ReturnRateRow {
 const query = (db: Db, f: ReportFilter, by: ReturnRateGroup, explain = false) => {
   const key = by === 'city' ? db`coalesce(lower(trim(s.city)), '-')` : db`to_char(s.booked_at at time zone 'Asia/Karachi', 'YYYY-MM')`;
   const label = by === 'city' ? db`coalesce(min(trim(s.city)), '(no city)')` : db`to_char(s.booked_at at time zone 'Asia/Karachi', 'YYYY-MM')`;
+  // The stage, as in the headline rate: a parcel on its way back is returned, whatever code PostEx sent last.
+  const stage = db.unsafe(STAGE_SQL);
   return db<{ key: string; label: string; delivered: number; returned: number }[]>`
     ${prefix(db, explain)}
     select ${key} as key, ${label} as label,
-           count(*) filter (where s.status_code = '0005')::int as delivered,
-           count(*) filter (where s.status_code = '0006')::int as returned
+           count(*) filter (where ${stage} = 'delivered')::int as delivered,
+           count(*) filter (where ${stage} in ('returning', 'returned'))::int as returned
     from shipments s
     where not shipment_is_pr(s.id) and s.booked_at is not null ${bookedWhere(db, f)}
     group by 1
-    having count(*) filter (where s.status_code in ('0005', '0006')) > 0
-    order by (count(*) filter (where s.status_code in ('0005', '0006'))) desc, 1
+    having count(*) filter (where ${stage} in ('delivered', 'returning', 'returned')) > 0
+    order by (count(*) filter (where ${stage} in ('delivered', 'returning', 'returned'))) desc, 1
     limit 200
   `;
 };

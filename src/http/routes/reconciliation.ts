@@ -7,6 +7,12 @@ import { ReviewItemNotOpenError, countOpenByKind, decideReviewItem, listReviewIt
 import { LinkError, linkShipmentToOrder, unlinkShipmentFromOrder } from '../../db/repos/shipment-links.js';
 import { DEFAULT_WINDOW_DAYS } from '../../domain/matching.js';
 import { candidatesFor } from '../../jobs/postex-match.js';
+import { configuredPostexAccounts, resyncParcel } from '../../jobs/postex.js';
+import { configuredStores, emptyCounts, resyncOrder } from '../../jobs/shopify.js';
+import { returnsReconciliation } from '../../db/repos/returns-reconciliation.js';
+import { openReviewItem } from '../../db/repos/review.js';
+import type { IssueKind } from '../../domain/returns-reconciliation.js';
+import { logger } from '../../logger.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
 import { ID, parse } from '../validate.js';
@@ -34,8 +40,77 @@ const link = z
   })
   .refine((v) => v.orderId || v.orderNumber, { message: 'orderId or orderNumber is required' });
 
+const returnsQuery = z.object({
+  store: z.enum(['nur', 'organics']).optional(),
+  /** `true`: every return, not only the ones where the sources disagree. */
+  all: z.enum(['true', 'false']).optional(),
+  kind: z.string().regex(/^[a-z_]+$/).optional(),
+});
+const resync = z
+  .object({ orderId: z.string().regex(ID).optional(), shipmentId: z.string().regex(ID).optional() })
+  .refine((v) => v.orderId || v.shipmentId, { message: 'orderId or shipmentId is required' });
+
 export const reconciliationRouter = (getSql: SqlProvider): Router => {
   const router = Router();
+
+  /**
+   * Returns as PostEx, the platform and Shopify each record them, and where they disagree
+   * (domain/returns-reconciliation.ts). Read-only.
+   */
+  router.get('/reconciliation/returns', async (req, res) => {
+    const q = parse(returnsQuery, req.query);
+    const result = await returnsReconciliation(requireSql(getSql), {
+      onlyIssues: q.all !== 'true',
+      ...(q.store ? { store: q.store } : {}),
+      ...(q.kind ? { kind: q.kind as IssueKind } : {}),
+    });
+    res.json(result);
+  });
+
+  /**
+   * Re-reads an order from Shopify and/or a parcel from PostEx, and re-derives everything that
+   * follows from them. The same upserts the syncs use, keyed on the external ids, so a repair can
+   * only bring records in line, never duplicate them or overwrite a person's decision. An order
+   * Shopify no longer has is kept (its parcel and money are real) and queued for a person.
+   */
+  router.post('/reconciliation/returns/resync', async (req, res) => {
+    const sql = requireSql(getSql);
+    const body = parse(resync, req.body);
+    const actor = await actorId(sql, sessionUser(req));
+    const result: { order: 'stored' | 'missing' | null; parcel: 'stored' | 'missing' | null } = { order: null, parcel: null };
+    if (body.orderId) {
+      const [order] = await sql<{ shopify_order_id: string | null; store_id: string; order_number: string }[]>`
+        select shopify_order_id::text, store_id, order_number from orders where id = ${body.orderId}
+      `;
+      if (!order) throw new HttpError(404, `Order ${body.orderId} not found`);
+      if (!order.shopify_order_id) throw new HttpError(409, `${order.order_number} is not a Shopify order`);
+      const store = (await configuredStores(sql)).find((s) => s.id === order.store_id);
+      if (!store) throw new HttpError(409, 'That store is not connected to Shopify');
+      const found = await resyncOrder({ sql, logger }, store, `gid://shopify/Order/${order.shopify_order_id}`, emptyCounts());
+      if (!found) {
+        await openReviewItem(sql, {
+          kind: 'shopify_order_missing',
+          dedupeKey: `shopify_order_missing:${body.orderId}`,
+          storeId: order.store_id,
+          orderId: body.orderId,
+          detail: { orderNumber: order.order_number },
+        });
+      }
+      result.order = found ? 'stored' : 'missing';
+    }
+    if (body.shipmentId) {
+      const [parcel] = await sql<{ postex_account_id: string }[]>`select postex_account_id from shipments where id = ${body.shipmentId}`;
+      if (!parcel) throw new HttpError(404, `Parcel ${body.shipmentId} not found`);
+      const account = (await configuredPostexAccounts(sql)).find((a) => a.id === parcel.postex_account_id);
+      if (!account) throw new HttpError(409, 'That PostEx account is not connected');
+      result.parcel = (await resyncParcel({ sql, logger }, account, body.shipmentId)) ? 'stored' : 'missing';
+    }
+    await sql`
+      insert into audit_log (actor_id, action, entity, entity_id, after)
+      values (${actor}, 'reconciliation.resync', ${body.shipmentId ? 'shipments' : 'orders'}, ${body.shipmentId ?? body.orderId ?? null}, ${sql.json(result as never)})
+    `;
+    res.json(result);
+  });
 
   router.get('/reconciliation/items', async (req, res) => {
     const sql = requireSql(getSql);

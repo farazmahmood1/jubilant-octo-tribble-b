@@ -291,7 +291,7 @@ export const storeOrderNode = async (
     const result = await atomically(deps.sql, async (tx) => {
       const customer = await upsertCustomer(tx, { storeId: store.id, ...mapped.customer, shopifyOrderId: mapped.order.shopifyOrderId });
       const address = customer && mapped.address ? await upsertAddress(tx, customer.id, mapped.address) : null;
-      const { updatedAt: _updatedAt, ...order } = mapped.order;
+      const { updatedAt: _updatedAt, refunded: _refunded, returnStatus: _returnStatus, ...order } = mapped.order;
       const stored = await upsertOrder(tx, {
         storeId: store.id,
         ...order,
@@ -299,6 +299,7 @@ export const storeOrderNode = async (
         shippingAddressId: address?.id ?? null,
         source: 'api',
         raw: node,
+        shopify: { refunded: mapped.order.refunded, returnStatus: mapped.order.returnStatus, refunds: mapped.refunds, returns: mapped.returns },
         lines: mapped.lines.map(({ shopifyVariantId, ...line }) => {
           // A line with no Shopify variant (a custom item) is not unmapped: there is nothing to map it to.
           const variantId = shopifyVariantId === null ? null : (variantIds.get(String(shopifyVariantId)) ?? null);

@@ -23,6 +23,8 @@ const header = (req: Request, name: string): string | undefined => {
  *
  * The response is sent as soon as the event is stored; processing runs after it. Shopify retries
  * a delivery that is not answered within 5 seconds, and a slow GraphQL call must not cause that.
+ * On a serverless host (`inlineMs`) work after the answer may never run, so the event is
+ * processed first, for at most that long; one that takes longer is left to shopify:catchup.
  *
  * `getDeps` returns null when there is no database, and deliveries are then refused with 503 so
  * Shopify retries them later.
@@ -91,13 +93,21 @@ export const shopifyWebhookRouter = (getDeps: () => WebhookDeps | null): Router 
       return;
     }
 
-    res.status(200).json({ received: true });
-    const defer = deps.defer ?? ((work) => void setImmediate(() => void work()));
-    defer(() =>
+    const work = () =>
       processWebhookEvent(deps, store, row.id).catch((error: unknown) =>
         deps.logger.warn({ ...context, webhookEventId: row.id, err: error }, 'Webhook processing failed; catch-up will retry'),
-      ),
-    );
+      );
+    if (deps.inlineMs) {
+      // Serverless: nothing runs after the answer, so process first, within Shopify's 5 seconds.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([work(), new Promise((resolve) => (timer = setTimeout(resolve, deps.inlineMs)))]);
+      clearTimeout(timer);
+      res.status(200).json({ received: true });
+      return;
+    }
+    res.status(200).json({ received: true });
+    const defer = deps.defer ?? ((job) => void setImmediate(() => void job()));
+    defer(work);
   });
 
   return router;

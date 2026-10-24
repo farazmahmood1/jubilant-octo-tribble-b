@@ -35,7 +35,7 @@ if (env.VERCEL) env.NODE_ENV = 'production';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(4000),
+  PORT: z.coerce.number().int().positive().default(5050),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CORS_ORIGIN: z.string().default('*'),
   DATABASE_URL: z.string().min(1).optional(),
@@ -62,6 +62,12 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => v?.toLowerCase() === 'true'),
+  // Where there is no worker process (Vercel), a cron calls GET /internal/cron with
+  // "Authorization: Bearer <CRON_SECRET>" to run the syncs that are due. Unset: the route refuses.
+  CRON_SECRET: z.string().min(16).optional(),
+  // How long one /internal/cron call may run jobs before telling them to stop at their next batch.
+  // Under the host's own limit (Vercel: 300 s by default), so the run is recorded before it is cut.
+  CRON_BUDGET_MS: z.coerce.number().int().min(5_000).max(780_000).default(240_000),
 });
 
 const parsed = schema.safeParse(env);
@@ -142,6 +148,12 @@ export const config = {
       shopifyStore('nur', 'NUR by Juggun', 'SHOPIFY_'),
       shopifyStore('organics', "Juggun's Organics", 'SHOPIFY_ORGANICS_'),
     ].filter((s): s is ShopifyStoreConfig => Boolean(s)),
+  },
+  sync: {
+    cronSecret: values.CRON_SECRET,
+    cronBudgetMs: values.CRON_BUDGET_MS,
+    // A function host freezes a request's work once the answer is sent: Vercel sets VERCEL=1.
+    serverless: Boolean(env.VERCEL),
   },
   postex: {
     allowWrites: values.POSTEX_ALLOW_WRITES,

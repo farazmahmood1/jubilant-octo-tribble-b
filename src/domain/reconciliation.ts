@@ -1,7 +1,7 @@
 import { daysBetweenKarachi } from '../lib/time.js';
 import type { Paisa } from '../lib/money.js';
 import { POSTEX_STATUS_CODES } from '../integrations/postex/mapper.js';
-import type { ConfirmationState } from './order-state.js';
+import { type ConfirmationState, FINAL_STAGES, type ParcelStage, RETURN_STAGES } from './order-state.js';
 
 /**
  * The five parcel reconciliation rules (BUILD-PLAN Step 9, proposal 6.6 step 6), as pure
@@ -28,6 +28,8 @@ export interface ParcelFacts {
   orderId: string | null;
   codAmount: Paisa | null;
   statusCode: string | null;
+  /** The parcel's stage from its whole history; when absent the latest code decides, as before. */
+  stage?: ParcelStage | null;
   bookedAt: Date | null;
   /** When PostEx last changed the parcel's status; falls back to booking for a parcel with no history. */
   statusUpdatedAt: Date | null;
@@ -51,6 +53,7 @@ export interface SiblingFacts {
   id: string;
   trackingNumber: string;
   statusCode: string | null;
+  stage?: ParcelStage | null;
 }
 
 export interface Finding {
@@ -74,6 +77,14 @@ export interface RuleInput {
 const TERMINAL: ReadonlySet<string> = new Set(['0005', '0006', '0002']);
 /** A parcel that is cancelled, returning or returned is out of the race; a re-send is expected. */
 const SETTLED_AWAY: ReadonlySet<string> = new Set(['0002', '0040', '0006']);
+
+type Positioned = { statusCode: string | null; stage?: ParcelStage | null };
+// By stage when known: a parcel on its way back keeps reporting movement codes (0039, 0037, 0032)
+// that are neither 0040 nor 0006, and is settled away all the same.
+const isFinal = (p: Positioned): boolean => (p.stage ? FINAL_STAGES.includes(p.stage) : p.statusCode !== null && TERMINAL.has(p.statusCode));
+const isSettledAway = (p: Positioned): boolean =>
+  p.stage ? p.stage === 'cancelled' || RETURN_STAGES.includes(p.stage) : p.statusCode !== null && SETTLED_AWAY.has(p.statusCode);
+const isDelivered = (p: Positioned): boolean => (p.stage ? p.stage === 'delivered' : p.statusCode === '0005');
 
 export const unmatchedParcel = ({ parcel }: RuleInput): Finding | null =>
   parcel.orderId !== null
@@ -113,8 +124,8 @@ export const codMismatch = ({ parcel, order }: RuleInput): Finding | null => {
 };
 
 export const duplicateBooking = ({ parcel, order, siblings }: RuleInput): Finding | null => {
-  if (parcel.statusCode !== null && SETTLED_AWAY.has(parcel.statusCode)) return null;
-  const live = siblings.filter((s) => s.id !== parcel.id && !(s.statusCode !== null && SETTLED_AWAY.has(s.statusCode)));
+  if (isSettledAway(parcel)) return null;
+  const live = siblings.filter((s) => s.id !== parcel.id && !isSettledAway(s));
   if (live.length === 0) return null;
   const all = [parcel.id, ...live.map((s) => s.id)].sort((a, b) => Number(a) - Number(b));
   // Id and number travel together, because the two lists above are sorted differently and so
@@ -139,7 +150,7 @@ export const duplicateBooking = ({ parcel, order, siblings }: RuleInput): Findin
 };
 
 export const stuckInTransit = ({ parcel, now, stuckDays }: RuleInput): Finding | null => {
-  if (parcel.statusCode !== null && TERMINAL.has(parcel.statusCode)) return null;
+  if (isFinal(parcel)) return null;
   const since = parcel.statusUpdatedAt ?? parcel.bookedAt;
   if (!since) return null;
   const days = daysBetweenKarachi(since, now);
@@ -190,7 +201,7 @@ export interface OrderAlertFacts {
   confirmedAt: Date | null;
   cancelledInShopify: boolean;
   onHold: boolean;
-  parcels: ReadonlyArray<{ id: string; trackingNumber: string; statusCode: string | null }>;
+  parcels: ReadonlyArray<{ id: string; trackingNumber: string; statusCode: string | null; stage?: ParcelStage | null }>;
 }
 
 export interface OrderRuleInput {
@@ -201,7 +212,7 @@ export interface OrderRuleInput {
 }
 
 /** A parcel the customer is not getting back to us on its own: neither cancelled, returning nor returned. */
-const STILL_OUT = (code: string | null) => code === null || !SETTLED_AWAY.has(code);
+const STILL_OUT = (p: Positioned) => !isSettledAway(p);
 
 export const confirmedNotBooked = ({ order, now, confirmedNotBookedHours, lookbackDays }: OrderRuleInput): Finding | null => {
   if (order.confirmation !== 'confirmed' && order.confirmation !== 'changed') return null;
@@ -220,13 +231,13 @@ export const confirmedNotBooked = ({ order, now, confirmedNotBookedHours, lookba
 export const cancelledButBooked = ({ order }: OrderRuleInput): Finding | null => {
   const by = order.cancelledInShopify ? 'shopify' : order.confirmation === 'cancelled' ? 'desk' : null;
   if (!by) return null;
-  const out = order.parcels.filter((p) => STILL_OUT(p.statusCode));
+  const out = order.parcels.filter((p) => STILL_OUT(p));
   if (out.length === 0) return null;
   return {
     kind: 'cancelled_but_booked',
     dedupeKey: `cancelled_but_booked:${order.id}`,
     // Delivered to a customer who had cancelled: money and stock have already moved.
-    severity: out.some((p) => p.statusCode === '0005') ? 'error' : 'warning',
+    severity: out.some((p) => isDelivered(p)) ? 'error' : 'warning',
     detail: {
       orderNumber: order.orderNumber,
       cancelledBy: by,

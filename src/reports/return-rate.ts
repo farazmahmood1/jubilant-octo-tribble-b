@@ -3,9 +3,11 @@ import { type ReportFilter, type Rate, rate } from './filter.js';
 import { outcomeCounts, outcomeQuery, parcelsWithOutcome } from './parcel-outcomes.js';
 
 /**
- * Return rate: parcels returned to the merchant ÷ parcels with a final delivered-or-returned
- * outcome, booked in the period. PR parcels are excluded. Parcels still in flight are not in
- * the denominator: they have no outcome yet, and counting them would make a busy week look good.
+ * Return rate: parcels returned ÷ parcels with a final delivered-or-returned outcome, booked in the
+ * period. Returned means the delivery failed and PostEx is bringing the parcel back or has: a
+ * parcel on its way back is a lost sale already, whatever movement PostEx reported last. PR
+ * parcels are excluded. Parcels still in flight are not in the denominator: they have no outcome
+ * yet, and counting them would make a busy week look good.
  */
 export const returnRate = async (db: Db, f: ReportFilter = {}): Promise<Rate> => {
   const c = await outcomeCounts(db, f);

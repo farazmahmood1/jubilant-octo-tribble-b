@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { sslOptions } from '../db.js';
+import { directUrl, sslOptions } from '../db.js';
 import { type TestSchema, createTestSchema, skipWithoutDb } from '../test/db.js';
 import { migrate } from './migrate.js';
 
@@ -18,6 +18,25 @@ describe('sslOptions', () => {
   it('lets a URL that names its own sslmode decide', () => {
     assert.deepEqual(sslOptions('postgres://u:p@db.example.com/db?sslmode=disable'), {});
     assert.deepEqual(sslOptions('postgres://u:p@localhost/db?sslmode=require'), {});
+  });
+});
+
+describe('directUrl', () => {
+  it('drops -pooler from a Neon pooled host and changes nothing else', () => {
+    assert.equal(
+      directUrl('postgresql://user:pass@ep-quiet-sky-123456-pooler.c-6.us-east-2.aws.neon.tech/db?sslmode=require&channel_binding=require'),
+      'postgresql://user:pass@ep-quiet-sky-123456.c-6.us-east-2.aws.neon.tech/db?sslmode=require&channel_binding=require',
+    );
+  });
+
+  it('leaves a direct or local URL as it is', () => {
+    for (const url of ['postgres://u:p@ep-example.ap-southeast-1.aws.neon.tech/db', 'postgres://postgres:x@localhost:5433/postgres']) {
+      assert.equal(directUrl(url), url);
+    }
+  });
+
+  it('only reads the host: a password that contains -pooler. is not touched', () => {
+    assert.equal(directUrl('postgres://u:my-pooler.pw@ep-a-pooler.c-6.aws.neon.tech/db'), 'postgres://u:my-pooler.pw@ep-a.c-6.aws.neon.tech/db');
   });
 });
 
@@ -52,8 +71,8 @@ describe('schema', { skip: skipWithoutDb }, () => {
         'confirmations', 'consignment_transfer_lines', 'consignment_transfers', 'customers', 'expenses', 'fiscal_periods', 'goods_receipts', 'gr_lines', 'influencer_codes', 'influencer_posts', 'influencers',
         'integration_cursors', 'invoice_lines', 'invoices', 'journal_entries', 'journal_lines', 'locations', 'order_csv_imports', 'order_lines',
         'order_state_log', 'orders', 'partner_sales', 'partner_sales_imports', 'payments', 'payout_lines', 'po_lines', 'postex_accounts', 'pr_send_lines', 'pr_sends', 'product_costs', 'products',
-        'purchase_orders', 'purchase_requests', 'quotation_lines', 'quotations', 'reconciliation_items', 'retail_partners', 'return_check_ins', 'schema_migrations', 'shipment_charges', 'shipment_events', 'shipments',
-        'shopify_stock_levels', 'shopify_writebacks',
+        'purchase_orders', 'purchase_requests', 'quotation_lines', 'quotations', 'reconciliation_items', 'retail_partners', 'return_check_in_lines', 'return_check_ins', 'schema_migrations', 'shipment_charges', 'shipment_events', 'shipments',
+        'shopify_refund_lines', 'shopify_refunds', 'shopify_returns', 'shopify_stock_levels', 'shopify_writeback_checks', 'shopify_writebacks',
         'stock_adjustments', 'stock_moves', 'stock_quants', 'stores', 'sync_runs', 'tax_rates', 'users', 'variants', 'vendor_bills', 'vendor_payments',
         'vendors', 'webhook_events',
       ],

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, beforeEach, describe, it } from 'node:test';
 
 import { type TestSchema, createTestSchema, skipWithoutDb } from '../test/db.js';
-import { MIGRATIONS_DIR, MigrationError, checksum, migrate, migrationStatus, readMigrations, summarizeMigrations } from './migrate.js';
+import { MIGRATIONS_DIR, MigrationError, checksum, checksumsOf, migrate, migrationStatus, readMigrations, summarizeMigrations } from './migrate.js';
 
 const copies: string[] = [];
 
@@ -26,7 +26,14 @@ describe('readMigrations', () => {
     const files = readMigrations();
     assert.equal(files[0]?.file, '0001_foundations.sql');
     assert.deepEqual(files.map((f) => f.version), [...files.map((f) => f.version)].sort());
-    assert.equal(files[0]?.checksum, checksum(files[0]?.sql ?? ''));
+    assert.equal(files[0]?.checksum, checksum((files[0]?.sql ?? '').replace(/\r\n/g, '\n')));
+  });
+
+  it('gives a file the same checksum whatever its line endings, and still tells a real edit apart', () => {
+    const lf = 'create table a (id int);\n-- note\n';
+    assert.equal(checksumsOf(lf).checksum, checksumsOf(lf.replace(/\n/g, '\r\n')).checksum);
+    assert.ok(checksumsOf(lf).accepted.includes(checksum(lf.replace(/\n/g, '\r\n'))), 'a CRLF checkout recorded earlier is accepted');
+    assert.ok(!checksumsOf(`${lf}-- edited\n`).accepted.includes(checksumsOf(lf).checksum));
   });
 
   it('rejects a misnamed file and a duplicate version', () => {
@@ -65,6 +72,19 @@ describe('migrate', { skip: skipWithoutDb }, () => {
       rows.map((r) => [r['version'], r['checksum']]),
       readMigrations(dir).map((f) => [f.version, f.checksum]),
     );
+  });
+
+  it('treats files applied from a CRLF checkout as applied when read with LF endings (the Vercel build)', async () => {
+    for (const f of readdirSync(dir)) writeFileSync(join(dir, f), readFileSync(join(dir, f), 'utf8').replace(/\r?\n/g, '\r\n'));
+    await schema.sql`create table schema_migrations (version text primary key, name text not null, checksum text not null, applied_at timestamptz not null default now(), duration_ms integer not null)`;
+    // What an older build recorded: the raw CRLF bytes' checksum.
+    for (const f of readMigrations(dir)) {
+      await schema.sql.unsafe(f.sql);
+      await schema.sql`insert into schema_migrations (version, name, checksum, duration_ms) values (${f.version}, ${f.name}, ${checksum(f.sql)}, 0)`;
+    }
+    for (const f of readdirSync(dir)) writeFileSync(join(dir, f), readFileSync(join(dir, f), 'utf8').replace(/\r\n/g, '\n'));
+    assert.equal((await summarizeMigrations(schema.sql, dir)).status, 'ok');
+    assert.deepEqual(await migrate(schema.sql, dir), []);
   });
 
   it('refuses to run when an applied file was edited, and applies nothing else', async () => {

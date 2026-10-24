@@ -29,6 +29,7 @@ const run = async (from = '2026-05-14', to = '2026-09-19'): Promise<number> => {
     console.log(`    parcels            ${t.parcels}`);
     console.log(`    delivered (0005)   ${t.delivered}`);
     console.log(`    returned (0006)    ${t.returned}`);
+    console.log(`    on the way back    ${t.returning}   (return started, 0040, not handed back yet)`);
     console.log(`    forward charges    ${rs(t.forwardFee)}  + tax ${rs(t.forwardTax)}  = ${rs(t.forwardFee + t.forwardTax)}`);
     console.log(`    return charges     ${rs(t.reversalFee)}  + tax ${rs(t.reversalTax)}  = ${rs(t.reversalFee + t.reversalTax)}`);
   }

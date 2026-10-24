@@ -301,6 +301,35 @@ describe('JobRunner', { skip: skipWithoutDb }, () => {
     }
   });
 
+  it('runDue (a host with no worker): runs only the jobs whose interval has passed, or the ones forced, and tells them to stop at the budget', async () => {
+    const fresh = unique('fresh');
+    const stale = unique('stale');
+    const slow = unique('slow');
+    const ran: string[] = [];
+    let stopped = false;
+    const runner = new JobRunner(schema.sql, silent)
+      .register(job(fresh, async () => void ran.push('fresh'), 60 * 60_000))
+      .register(job(stale, async () => void ran.push('stale'), 60_000))
+      .register(
+        job(slow, async ({ signal }) => {
+          await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+          stopped = true;
+        }),
+      );
+    await schema.sql`
+      insert into sync_runs (job, account_ref, status, started_at, finished_at)
+      values (${fresh}, 'all', 'succeeded', now() - interval '5 minutes', now()), (${stale}, 'all', 'succeeded', now() - interval '2 minutes', now())
+    `;
+    const results = await runner.runDue({ budgetMs: 300 });
+    assert.deepEqual(ran, ['stale'], 'the hourly job ran 5 minutes ago and is not due');
+    assert.deepEqual(results.map((r) => [r.job, r.status]).sort(), [[slow, 'succeeded'], [stale, 'succeeded']].sort());
+    assert.equal(stopped, true, 'the job still running at the budget was told to stop, and its run was recorded');
+    assert.equal((await runsOf(slow))[0]?.status, 'succeeded');
+
+    await runner.runDue({ budgetMs: 1_000, force: [fresh] });
+    assert.deepEqual(ran, ['stale', 'fresh'], 'forced: runs whatever its last run; the others have just run');
+  });
+
   it('refuses unknown jobs, duplicate names and a non-positive schedule', async () => {
     const runner = new JobRunner(schema.sql, silent).register(job('dup', async () => {}));
     await assert.rejects(runner.runJobOnce('nope'), UnknownJobError);

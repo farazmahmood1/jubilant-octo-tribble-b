@@ -13,6 +13,7 @@ import { type Stores, migratedWithStores } from '../test/stores.js';
 import { syncPostex } from './postex.js';
 import { RECONCILIATION_JOB, scanReconciliation } from './reconciliation.js';
 import { jobs } from './registry.js';
+import { SYNC_EVERY_MS } from './runner.js';
 
 const silent = pino({ level: 'silent' }) as unknown as Logger;
 const NOW = new Date('2026-09-20T06:00:00Z');
@@ -124,6 +125,6 @@ describe('reconciliation:scan over the spike-scale history', { skip: skipWithout
   });
 
   it('is registered hourly, on the hour', () => {
-    assert.deepEqual(jobs.find((j) => j.name === RECONCILIATION_JOB)?.schedule, { everyMs: 60 * 60 * 1000, alignToClock: true });
+    assert.deepEqual(jobs.find((j) => j.name === RECONCILIATION_JOB)?.schedule, { everyMs: SYNC_EVERY_MS, alignToClock: true });
   });
 });

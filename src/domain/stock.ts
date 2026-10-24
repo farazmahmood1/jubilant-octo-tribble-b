@@ -2,7 +2,7 @@ import type { Sql } from '../db.js';
 import { openReviewItem } from '../db/repos/review.js';
 import { type Db, atomically } from '../db/repos/upsert.js';
 import { POSTEX_STATUS_CODES, type ShipmentEvent } from '../integrations/postex/mapper.js';
-import { type OrderState, explain } from './order-state.js';
+import { type OrderState, type ParcelStage, RETURN_STAGES, explain } from './order-state.js';
 
 /**
  * The stock ledger (BUILD-PLAN 1.4, Step 8). A unit only ever moves from one location to another;
@@ -260,7 +260,7 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
     const stored = await tx<{ id: string; code: string; message: string; occurred_at: Date | null; created_at: Date }[]>`
       select id, code, message, occurred_at, created_at from shipment_events where shipment_id = ${shipmentId}
     `;
-    const [checkIn] = await tx<{ id: string; outcome: 'restocked' | 'damaged'; actor_id: string; checked_in_at: Date }[]>`
+    const [checkIn] = await tx<{ id: string; outcome: CheckInOutcome; actor_id: string; checked_in_at: Date }[]>`
       select id, outcome, actor_id, checked_in_at from return_check_ins where shipment_id = ${shipmentId}
     `;
 
@@ -271,6 +271,11 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
 
     let target: LocationKey;
     let ref: { type: string; id: string; at: Date; actorId: string | null; reason: string };
+    if (checkIn?.outcome === 'mixed') {
+      const moves = await splitCheckIn(tx, shipmentId, checkIn);
+      await tx`update shipments set stock_pending = false where id = ${shipmentId} and stock_pending`;
+      return { shipmentId, orderId: parcel.order_id, target: 'warehouse', moves };
+    }
     if (checkIn) {
       target = checkIn.outcome === 'restocked' ? 'warehouse' : 'damaged';
       ref = { type: 'return_check_in', id: checkIn.id, at: checkIn.checked_in_at, actorId: checkIn.actor_id, reason: `return_${checkIn.outcome}` };
@@ -349,40 +354,134 @@ export const reconcileShipmentStock = async (sql: Sql, shipmentId: string): Prom
     return { shipmentId, orderId: parcel.order_id, target, moves };
   });
 
+export type CheckInOutcome = 'restocked' | 'damaged' | 'mixed';
+
+/** One product of a split check-in: how many of its units went back on the shelf, and how many are damaged. */
+export interface CheckInLine {
+  variantId: string;
+  restocked: number;
+  damaged: number;
+}
+
 /**
- * A person has the returned parcel in hand: its units go back on the shelf or to damaged. Allowed
- * once PostEx has started the return (0040) or finished it (0006); the team often has the parcel
- * before PostEx updates. Recorded once per parcel and audited (rule 8).
+ * A split check-in's moves: per product, its damaged units to `damaged` and the rest to the
+ * shelf, from wherever the parcel's own moves left them. Re-running writes nothing: once a
+ * product is placed, the parcel holds nothing more of it anywhere else.
+ */
+const splitCheckIn = async (tx: Db, shipmentId: string, checkIn: { id: string; actor_id: string; checked_in_at: Date }): Promise<number> => {
+  const lines = await tx<{ variant_id: string; damaged: number }[]>`
+    select variant_id, damaged from return_check_in_lines where check_in_id = ${checkIn.id}
+  `;
+  const damagedOf = new Map(lines.map((l) => [l.variant_id, l.damaged]));
+  const warehouse = await locationId(tx, 'warehouse');
+  const damaged = await locationId(tx, 'damaged');
+  const held = await holdings(tx, shipmentId);
+  let moves = 0;
+  for (const variantId of new Set(held.map((h) => h.variantId))) {
+    let toDamage = (damagedOf.get(variantId) ?? 0) - (held.find((h) => h.variantId === variantId && h.locationId === damaged)?.qty ?? 0);
+    for (const holding of held.filter((h) => h.variantId === variantId && h.locationId !== damaged)) {
+      const broken = Math.min(Math.max(toDamage, 0), holding.qty);
+      toDamage -= broken;
+      const parts: Array<[string, number, string]> = [
+        [damaged, broken, 'return_damaged'],
+        [warehouse, holding.qty - broken, 'return_restocked'],
+      ];
+      for (const [to, qty, reason] of parts) {
+        if (qty <= 0) continue;
+        const written = await recordMove(tx, {
+          variantId,
+          qty,
+          from: holding.locationId,
+          to,
+          reason,
+          refType: 'return_check_in',
+          refId: checkIn.id,
+          shipmentId,
+          actorId: checkIn.actor_id,
+          occurredAt: checkIn.checked_in_at,
+        });
+        if (written) moves++;
+      }
+    }
+  }
+  return moves;
+};
+
+/**
+ * A person has the returned parcel in hand: its units go back on the shelf, to damaged, or split
+ * product by product (`lines`, which must account for every unit the parcel carried). Allowed once
+ * the parcel's history says it is coming back (0040, and every movement after it) or is back
+ * (0006); the team often has the parcel before PostEx updates. Recorded once per parcel and
+ * audited (rule 8): a second check-in of the same parcel, from a double click or a retry, is
+ * refused and changes nothing.
  */
 export const checkInReturn = async (
   sql: Sql,
   shipmentId: string,
-  outcome: 'restocked' | 'damaged',
+  outcome: CheckInOutcome,
   actorId: string,
   note?: string,
+  lines?: readonly CheckInLine[],
 ): Promise<ReconcileResult> => {
   await atomically(sql, async (tx) => {
-    const [parcel] = await tx<{ status_code: string | null; tracking_number: string }[]>`
-      select status_code, tracking_number from shipments where id = ${shipmentId} for update
+    const [parcel] = await tx<{ stage: ParcelStage | null; status_code: string | null; tracking_number: string }[]>`
+      select stage, status_code, tracking_number from shipments where id = ${shipmentId} for update
     `;
     if (!parcel) throw new StockError(`Shipment ${shipmentId} not found`);
-    if (parcel.status_code !== '0040' && parcel.status_code !== '0006') {
-      throw new StockError(`Parcel ${parcel.tracking_number} is not being returned (status ${parcel.status_code ?? 'none'}); nothing to check in`);
+    const coming = parcel.stage ? RETURN_STAGES.includes(parcel.stage) : parcel.status_code === '0040' || parcel.status_code === '0006';
+    if (!coming) {
+      throw new StockError(`Parcel ${parcel.tracking_number} is not being returned (${parcel.stage ?? `status ${parcel.status_code ?? 'none'}`}); nothing to check in`);
     }
+    const split = outcome === 'mixed' ? await validSplit(tx, shipmentId, parcel.tracking_number, lines ?? []) : null;
     const [row] = await tx<{ id: string }[]>`
       insert into return_check_ins (shipment_id, outcome, note, actor_id) values (${shipmentId}, ${outcome}, ${note ?? null}, ${actorId})
       on conflict (shipment_id) do nothing
       returning id
     `;
     if (!row) throw new StockError(`Parcel ${parcel.tracking_number} is already checked in`);
+    for (const line of split ?? []) {
+      await tx`insert into return_check_in_lines (check_in_id, variant_id, restocked, damaged) values (${row.id}, ${line.variantId}, ${line.restocked}, ${line.damaged})`;
+    }
     // A damaged return is written off in the journal: the accounting pass picks it up.
     await tx`update shipments set accounting_pending = true where id = ${shipmentId}`;
     await tx`
       insert into audit_log (actor_id, action, entity, entity_id, after)
-      values (${actorId}, 'stock.return_check_in', 'shipments', ${shipmentId}, ${tx.json({ outcome, checkInId: row.id } as never)})
+      values (${actorId}, 'stock.return_check_in', 'shipments', ${shipmentId}, ${tx.json({ outcome, checkInId: row.id, ...(split ? { lines: split } : {}) } as never)})
     `;
   });
   return reconcileShipmentStock(sql, shipmentId);
+};
+
+/**
+ * A split must place every unit the parcel carried, per product, and nothing else: a product the
+ * parcel did not carry, a count that does not add up, or a split that sends everything one way
+ * (that is a plain restock or damaged check-in) is refused with what was expected.
+ */
+const validSplit = async (tx: Db, shipmentId: string, trackingNumber: string, lines: readonly CheckInLine[]): Promise<CheckInLine[]> => {
+  const carried = await tx<{ variant_id: string; qty: number }[]>`
+    select variant_id, sum(qty)::int as qty from stock_moves where shipment_id = ${shipmentId} and ref_type = 'shipment' and reason = 'booked' group by variant_id
+  `;
+  if (carried.length === 0) throw new StockError(`Parcel ${trackingNumber}'s items are not linked to products, so it can only be checked in whole`);
+  const given = new Map<string, CheckInLine>();
+  for (const line of lines) {
+    if (!Number.isInteger(line.restocked) || !Number.isInteger(line.damaged) || line.restocked < 0 || line.damaged < 0) throw new StockError('Quantities must be whole numbers, zero or more');
+    if (given.has(line.variantId)) throw new StockError('A product appears twice in the check-in');
+    given.set(line.variantId, line);
+  }
+  for (const id of given.keys()) {
+    if (!carried.some((c) => c.variant_id === id)) throw new StockError(`Parcel ${trackingNumber} did not carry product ${id}`);
+  }
+  const split = carried.map((c) => {
+    const line = given.get(c.variant_id);
+    if (!line || line.restocked + line.damaged !== c.qty) {
+      throw new StockError(`Parcel ${trackingNumber} carried ${c.qty} of product ${c.variant_id}; restocked and damaged must add up to ${c.qty}`);
+    }
+    return { variantId: c.variant_id, restocked: line.restocked, damaged: line.damaged };
+  });
+  if (split.every((l) => l.damaged === 0) || split.every((l) => l.restocked === 0)) {
+    throw new StockError('Everything went one way: check the parcel in as restocked or as damaged instead of splitting it');
+  }
+  return split;
 };
 
 export interface AwaitingCheckIn {
@@ -394,21 +493,34 @@ export interface AwaitingCheckIn {
 }
 
 /**
- * The returns-not-checked-in alert: PostEx says the parcel is back at the merchant (0006) and
- * nobody has checked it in. Unmatched parcels are included; the parcel is physically missing
- * whether or not its order is known. Oldest first.
+ * The returns-not-checked-in alert: PostEx says the parcel is back at the merchant (stage
+ * `returned`, its 0006, whatever movement codes came with it) and nobody has checked it in.
+ * Unmatched parcels are included; the parcel is physically missing whether or not its order is
+ * known. Oldest first. Parcels still on their way back are counted by `returnsComingBack`.
  */
 export const returnsAwaitingCheckIn = async (db: Db, storeKey?: string): Promise<AwaitingCheckIn[]> => {
   const rows = await db<{ id: string; tracking_number: string; account: string; order_id: string | null; returned_at: Date | null }[]>`
-    select s.id, s.tracking_number, a.key as account, s.order_id, s.status_updated_at as returned_at
+    select s.id, s.tracking_number, a.key as account, s.order_id,
+           coalesce((select max(e.occurred_at) from shipment_events e where e.shipment_id = s.id and e.code = '0006'), s.status_updated_at) as returned_at
     from shipments s
     join postex_accounts a on a.id = s.postex_account_id
-    where s.status_code = '0006'
+    where coalesce(s.stage = 'returned', s.status_code = '0006')
       ${storeKey ? db`and a.store_id = (select id from stores where key = ${storeKey})` : db``}
       and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)
-    order by s.status_updated_at nulls last, s.id
+    order by returned_at nulls last, s.id
   `;
   return rows.map((r) => ({ shipmentId: r.id, trackingNumber: r.tracking_number, account: r.account, orderId: r.order_id, returnedAt: r.returned_at }));
+};
+
+/** Parcels PostEx is bringing back (return started, not handed over yet) that nobody has checked in early. */
+export const returnsComingBack = async (db: Db, storeKey?: string): Promise<number> => {
+  const [row] = await db<{ n: number }[]>`
+    select count(*)::int as n from shipments s join postex_accounts a on a.id = s.postex_account_id
+    where s.stage = 'returning'
+      ${storeKey ? db`and a.store_id = (select id from stores where key = ${storeKey})` : db``}
+      and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)
+  `;
+  return row?.n ?? 0;
 };
 
 // ---- Stock counts ----
@@ -560,7 +672,7 @@ export const stockHealth = async (db: Db): Promise<StockHealth[]> => {
       (select coalesce(sum(q.qty), 0)::int from stock_quants q join locations l on l.id = q.location_id join variants v on v.id = q.variant_id
         where l.key = 'returning' and v.store_id = st.id) as back,
       (select count(*)::int from shipments s join postex_accounts a on a.id = s.postex_account_id
-        where a.store_id = st.id and s.status_code = '0006' and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)) as waiting,
+        where a.store_id = st.id and coalesce(s.stage = 'returned', s.status_code = '0006') and not exists (select 1 from return_check_ins c where c.shipment_id = s.id)) as waiting,
       (select count(*)::int from order_lines ol join orders o on o.id = ol.order_id
         where o.store_id = st.id and ol.variant_id is null and ol.qty > 0 and exists (select 1 from shipments s where s.order_id = o.id)) as unmapped
     from stores st order by st.key

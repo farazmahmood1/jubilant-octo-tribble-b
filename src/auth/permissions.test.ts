@@ -13,7 +13,8 @@ const privateRoutes = (): Array<{ method: string; path: string; file: string }> 
   const found: Array<{ method: string; path: string; file: string }> = [];
   for (const file of readdirSync(routesDir)) {
     // Public: sign-in, health, Shopify's own signed webhooks. Everything else needs a session.
-    if (!file.endsWith('.ts') || file.endsWith('.test.ts') || ['auth.ts', 'health.ts', 'shopify-webhooks.ts', 'index.ts'].includes(file)) continue;
+    // The cron route is guarded by its own secret (CRON_SECRET), not a session.
+    if (!file.endsWith('.ts') || file.endsWith('.test.ts') || ['auth.ts', 'health.ts', 'shopify-webhooks.ts', 'cron.ts', 'index.ts'].includes(file)) continue;
     const source = readFileSync(join(routesDir, file), 'utf8');
     for (const m of source.matchAll(/(?:router|\w+Router)\.(get|post|put|patch|delete)\(\s*([`'])([^`']+)\2/g)) {
       found.push({ method: m[1]!.toUpperCase(), path: m[3]!, file });

@@ -120,9 +120,12 @@ export const ROUTE_POLICY: readonly Rule[] = [
   { path: /^\/integrations\/shopify-access$/, read: ['integrations.read', 'confirmations.work', 'returns.read'] },
 
   { path: /^\/integrations\//, read: 'integrations.read' },
+  // How fresh the data is, and asking the due syncs to run: every role works with Shopify or PostEx data.
+  { path: /^\/sync\/(status|run)$/, read: ['dashboard.read', 'orders.read', 'accounting.read'], write: ['dashboard.read', 'orders.read', 'accounting.read'] },
   { path: /^\/reconciliation\//, read: 'reconciliation.read', write: 'reconciliation.work' },
 
-  { path: /^\/stock\/returns\//, write: 'returns.checkin' },
+  // Reading is what a parcel carried, for whoever checks it in (a split check-in lists it).
+  { path: /^\/stock\/returns\//, read: ['returns.checkin', 'stock.read'], write: 'returns.checkin' },
   { path: /^\/stock\/damaged$/, read: ['returns.read', 'stock.read'] },
   { path: /^\/stock\/(adjustments|opening-from-shopify|counts)$/, write: 'stock.adjust' },
   { path: /^\/stock\//, read: 'stock.read' },

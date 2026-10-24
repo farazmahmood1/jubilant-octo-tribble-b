@@ -57,7 +57,8 @@ export const damagedRegister = async (db: Db, f: DamagedFilter, opts: { phones: 
            (select min(e.occurred_at) from shipment_events e where e.shipment_id = s.id and e.code = '0006') as returned_at,
            c.checked_in_at as damaged_at, u.name as damaged_by, c.note,
            (select json_agg(json_build_object('variantId', v.id::text, 'title', p.title || case when v.title = 'Default Title' then '' else ' · ' || v.title end, 'sku', v.sku, 'qty', m.qty) order by p.title)
-              from (select variant_id, sum(qty)::int as qty from stock_moves where ref_type = 'return_check_in' and ref_id = c.id::text group by variant_id) m
+              from (select sm.variant_id, sum(sm.qty)::int as qty from stock_moves sm join locations dl on dl.id = sm.to_location_id
+                    where sm.ref_type = 'return_check_in' and sm.ref_id = c.id::text and dl.key = 'damaged' group by sm.variant_id) m
               join variants v on v.id = m.variant_id join products p on p.id = v.product_id) as items,
            (select sum(l.debit_paisa)::text from journal_entries j join journal_lines l on l.entry_id = j.id join accounts ac on ac.id = l.account_id
               where j.source_type = 'shipment_write_off' and j.source_id = s.id::text and j.reversed_by is null and ac.code = '6200') as written_off
@@ -70,7 +71,8 @@ export const damagedRegister = async (db: Db, f: DamagedFilter, opts: { phones: 
     left join customers cu on cu.id = o.customer_id
     left join addresses ad on ad.id = o.shipping_address_id
     join users u on u.id = c.actor_id
-    where c.outcome = 'damaged'
+    -- A split check-in is listed for its damaged units only; its restocked ones are back on the shelf.
+    where c.outcome in ('damaged', 'mixed')
       ${f.store ? db`and coalesce(ost.key, ast.key) = ${f.store}` : db``}
       ${f.from ? db`and (c.checked_in_at at time zone 'Asia/Karachi')::date >= ${f.from}::date` : db``}
       ${f.to ? db`and (c.checked_in_at at time zone 'Asia/Karachi')::date <= ${f.to}::date` : db``}

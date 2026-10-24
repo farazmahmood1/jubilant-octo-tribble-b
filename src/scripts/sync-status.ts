@@ -20,8 +20,8 @@ const run = async (): Promise<number> => {
            count(s.id)::int as parcels,
            count(s.booked_at)::int as dated,
            count(distinct e.shipment_id)::int as detailed,
-           count(s.id) filter (where s.status_code = '0005')::int as delivered,
-           count(s.id) filter (where s.status_code = '0006')::int as returned,
+           count(s.id) filter (where s.stage = 'delivered')::int as delivered,
+           count(s.id) filter (where s.stage in ('returning', 'returned'))::int as returned,
            min(s.booked_at) as first, max(s.booked_at) as last
     from postex_accounts a
     left join shipments s on s.postex_account_id = a.id

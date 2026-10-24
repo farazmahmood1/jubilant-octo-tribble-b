@@ -167,6 +167,11 @@ describe('postex_unknown_status', () => {
   it('near miss: a history of listed codes only, including 0013 twice', () => {
     assert.deepEqual(unknownStatus(input('returned')), []);
   });
+
+  it('near miss: the routine movement and return-leg codes PostEx sends are known', () => {
+    const codes = ['0001', '0036', '0031', '0003', '0033', '0035', '0038', '0004', '0039', '0037', '0032'];
+    assert.deepEqual(unknownStatus({ ...input('delivered'), events: codes.map((code) => ({ code })) }), []);
+  });
 });
 
 describe('evaluate', () => {

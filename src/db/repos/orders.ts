@@ -41,6 +41,29 @@ export interface OrderInput {
   source: OrderSource;
   raw: unknown;
   lines: OrderLineInput[];
+  /**
+   * Shopify's refunds and returns, read with the order (API orders only). Left out, nothing about
+   * them is touched: a CSV import knows none of it and must not erase what the API stored.
+   */
+  shopify?: { refunded: Paisa; returnStatus: string | null; refunds: RefundInput[]; returns: ReturnInput[] };
+}
+
+/** A Shopify refund. A cancellation is one too: its lines say whether the units were restocked. */
+export interface RefundInput {
+  shopifyRefundId: bigint;
+  refundedAt: Date;
+  amount: Paisa;
+  lines: Array<{ shopifyLineItemId: bigint; qty: number; restockType: string; restocked: boolean; amount: Paisa }>;
+}
+
+/** A return recorded in Shopify (the Returns feature), with what was asked back per line item. */
+export interface ReturnInput {
+  shopifyReturnId: bigint;
+  name: string | null;
+  status: string;
+  openedAt: Date | null;
+  closedAt: Date | null;
+  lines: Array<{ lineItemId: string | null; qty: number; reason: string | null }>;
 }
 
 export interface OrderLineRow {
@@ -110,6 +133,7 @@ const upsertHeader = async (db: Db, input: OrderInput): Promise<UpsertResult> =>
     postex_tracking_numbers: input.postexTrackingNumbers ?? [],
     source: input.source,
     raw: input.raw === undefined || input.raw === null ? null : db.json(input.raw as never),
+    ...(input.shopify ? { refunded_paisa: big(input.shopify.refunded), return_status: input.shopify.returnStatus } : {}),
   };
   // A Shopify order is identified by its Shopify id; a consignment sale, which has none, by its
   // order number. Either way the key includes the store.
@@ -166,8 +190,46 @@ export const upsertOrder = async (db: Db, input: OrderInput): Promise<OrderUpser
       returning id
     `;
     lines.removed = removed.length;
-    return { ...header, changed: header.changed || lines.changed > 0 || lines.removed > 0, lines };
+    const adjusted = input.shopify ? await upsertShopifyAdjustments(tx, input.storeId, header.id, input.shopify) : 0;
+    return { ...header, changed: header.changed || lines.changed > 0 || lines.removed > 0 || adjusted > 0, lines };
   });
+
+/**
+ * Stores an order's Shopify refunds and returns, keyed on Shopify's ids, so a re-sync adds nothing.
+ * Refunds never change once made; a return's status does. Returns how many rows were new or changed.
+ */
+const upsertShopifyAdjustments = async (db: Db, storeId: string, orderId: string, shopify: NonNullable<OrderInput['shopify']>): Promise<number> => {
+  let changed = 0;
+  for (const refund of shopify.refunds) {
+    const [row] = await db<{ id: string; inserted: boolean }[]>`
+      insert into shopify_refunds (store_id, order_id, shopify_refund_id, refunded_at, amount_paisa)
+      values (${storeId}, ${orderId}, ${big(refund.shopifyRefundId)}, ${refund.refundedAt}, ${big(refund.amount)})
+      on conflict (store_id, shopify_refund_id) do update set amount_paisa = excluded.amount_paisa
+      returning id, (xmax = 0) as inserted
+    `;
+    if (row!.inserted) changed++;
+    for (const line of refund.lines) {
+      await db`
+        insert into shopify_refund_lines (refund_id, shopify_line_item_id, qty, restock_type, restocked, amount_paisa)
+        values (${row!.id}, ${big(line.shopifyLineItemId)}, ${line.qty}, ${line.restockType}, ${line.restocked}, ${big(line.amount)})
+        on conflict (refund_id, shopify_line_item_id) do update
+          set qty = excluded.qty, restock_type = excluded.restock_type, restocked = excluded.restocked, amount_paisa = excluded.amount_paisa
+      `;
+    }
+  }
+  for (const ret of shopify.returns) {
+    const [row] = await db<{ changed: boolean }[]>`
+      with prev as (select status, closed_at from shopify_returns where store_id = ${storeId} and shopify_return_id = ${big(ret.shopifyReturnId)})
+      insert into shopify_returns (store_id, order_id, shopify_return_id, name, status, opened_at, closed_at, lines)
+      values (${storeId}, ${orderId}, ${big(ret.shopifyReturnId)}, ${ret.name}, ${ret.status}, ${ret.openedAt}, ${ret.closedAt}, ${db.json(ret.lines as never)})
+      on conflict (store_id, shopify_return_id) do update
+        set name = excluded.name, status = excluded.status, opened_at = excluded.opened_at, closed_at = excluded.closed_at, lines = excluded.lines
+      returning (select row(status, closed_at) from prev) is distinct from row(shopify_returns.status, shopify_returns.closed_at) as changed
+    `;
+    if (row!.changed) changed++;
+  }
+  return changed;
+};
 
 interface RawOrder {
   id: string;

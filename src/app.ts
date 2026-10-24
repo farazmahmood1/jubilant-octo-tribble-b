@@ -11,6 +11,7 @@ import type { StockRouterOptions } from './http/routes/stock.js';
 import { createApiRouter } from './http/routes/index.js';
 import { healthRouter } from './http/routes/health.js';
 import { shopifyWebhookRouter } from './http/routes/shopify-webhooks.js';
+import { cronRouter } from './http/routes/cron.js';
 import { logger } from './logger.js';
 import { type WebhookDeps, configuredWebhookStore } from './webhooks/shopify.js';
 
@@ -35,7 +36,14 @@ const helmet: HelmetFn =
 const defaultWebhookDeps =(): WebhookDeps | null => {
   const sql = db();
   if (!sql) return null;
-  return { sql, logger, resolveStore: (shopDomain) => configuredWebhookStore(sql, shopDomain) };
+  return {
+    sql,
+    logger,
+    resolveStore: (shopDomain) => configuredWebhookStore(sql, shopDomain),
+    // A function host may freeze the work once the answer is sent, so it is done first (Shopify
+    // waits 5 seconds). Whatever does not finish is left unprocessed for shopify:catchup.
+    ...(config.sync.serverless ? { inlineMs: 4_000 } : {}),
+  };
 };
 
 export const createApp = (options: AppOptions = {}): Express => {
@@ -56,6 +64,7 @@ export const createApp = (options: AppOptions = {}): Express => {
   );
 
   app.use(healthRouter);
+  app.use(cronRouter(options.sql ?? db));
   app.use('/api/v1', createApiRouter(options.sql ?? db, { ...(options.confirmations ? { confirmations: options.confirmations } : {}), ...(options.stock ? { stock: options.stock } : {}) }));
 
   app.use(notFound);

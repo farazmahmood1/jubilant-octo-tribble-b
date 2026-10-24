@@ -5,9 +5,10 @@ import { actorId } from '../../auth/actor.js';
 import { can } from '../../auth/permissions.js';
 import { damagedRegister } from '../../db/repos/damaged.js';
 import { postShipmentAccounting } from '../../domain/accounting.js';
-import { type ShopifyReturnsGateway, syncCheckInToShopify } from '../../domain/shopify-returns.js';
+import { ReturnsActionError, type ShopifyReturnsGateway, cancelShopifyOrderForReturn, syncCheckInToShopify } from '../../domain/shopify-returns.js';
+import { parcelUnits } from '../../db/repos/parcels.js';
 import { openingStockFromShopify, shopifyStockComparison } from '../../domain/opening-stock.js';
-import { StockError, checkInReturn, countSheet, recordAdjustment, recordCount, returnsAwaitingCheckIn, stockHealth } from '../../domain/stock.js';
+import { StockError, checkInReturn, countSheet, recordAdjustment, recordCount, returnsAwaitingCheckIn, returnsComingBack, stockHealth } from '../../domain/stock.js';
 import { endOfKarachiDay } from '../../lib/time.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
@@ -22,7 +23,15 @@ import { ID, parse } from '../validate.js';
 const shipmentParams = z.object({ shipmentId: z.string().regex(ID) });
 const variantParams = z.object({ variantId: z.string().regex(ID) });
 const movesQuery = z.object({ before: z.string().regex(ID).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) });
-const checkIn = z.object({ outcome: z.enum(['restocked', 'damaged']), note: z.string().trim().max(2000).optional() });
+const checkIn = z.object({
+  outcome: z.enum(['restocked', 'damaged', 'mixed']),
+  note: z.string().trim().max(2000).optional(),
+  /** `mixed` only: per product, how many units went back on the shelf and how many are damaged. */
+  lines: z
+    .array(z.object({ variantId: z.string().regex(ID), restocked: z.number().int().min(0).max(10_000), damaged: z.number().int().min(0).max(10_000) }))
+    .max(200)
+    .optional(),
+});
 const quantsQuery = z.object({
   location: z.string().regex(/^[a-z_]+$/).optional(),
   store: z.enum(['nur', 'organics']).optional(),
@@ -65,9 +74,10 @@ const asAtDay = (day: string): Date => {
   }
 };
 
-/** StockError is a rule the request broke, not a server fault. */
+/** StockError is a rule the request broke, not a server fault; a return action Shopify refused says why. */
 const asHttp = (error: unknown): never => {
   if (error instanceof StockError) throw new HttpError(409, error.message);
+  if (error instanceof ReturnsActionError) throw new HttpError(error.status, error.message);
   throw error;
 };
 
@@ -89,7 +99,13 @@ export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {
   router.get('/stock/returns-awaiting', async (req, res) => {
     const sql = requireSql(getSql);
     const { store } = parse(storeQuery, req.query);
-    res.json({ returns: await returnsAwaitingCheckIn(sql, store) });
+    res.json({ returns: await returnsAwaitingCheckIn(sql, store), comingBack: await returnsComingBack(sql, store) });
+  });
+
+  /** What a returned parcel carried, per product: the lines a split check-in has to account for. */
+  router.get('/stock/returns/:shipmentId/units', async (req, res) => {
+    const { shipmentId } = parse(shipmentParams, req.params);
+    res.json({ units: await parcelUnits(requireSql(getSql), shipmentId) });
   });
 
   router.post('/stock/returns/:shipmentId/check-in', async (req, res) => {
@@ -97,7 +113,8 @@ export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {
     const { shipmentId } = parse(shipmentParams, req.params);
     const body = parse(checkIn, req.body);
     const actor = await actorId(sql, sessionUser(req));
-    const result = await checkInReturn(sql, shipmentId, body.outcome, actor, body.note).catch(asHttp);
+    if (body.outcome === 'mixed' && !body.lines?.length) throw new HttpError(400, 'lines: a split check-in says, per product, how many were restocked and how many are damaged');
+    const result = await checkInReturn(sql, shipmentId, body.outcome, actor, body.note, body.outcome === 'mixed' ? body.lines : undefined).catch(asHttp);
     // A damaged return is written off now rather than on the next sync.
     await postShipmentAccounting(sql, shipmentId);
     // Then Shopify: the check-in stands whatever Shopify says, and the attempt is kept to retry.
@@ -113,6 +130,20 @@ export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {
     const checkInId = await checkInOf(shipmentId);
     if (!checkInId) throw new HttpError(409, 'This parcel has not been checked in yet');
     const shopify = await syncCheckInToShopify(sql, { checkInId, actorId: await actorId(sql, sessionUser(req)), force: true, ...(gateway ? { gateway } : {}) });
+    res.json({ shopify });
+  });
+
+  /**
+   * Cancels the parcel's order in Shopify: its own action, never part of a check-in, for an order
+   * still open there with returned units committed to it. Restocks the items only if some came back
+   * in good condition. Audited.
+   */
+  router.post('/stock/returns/:shipmentId/shopify-cancel', async (req, res) => {
+    const sql = requireSql(getSql);
+    const { shipmentId } = parse(shipmentParams, req.params);
+    const checkInId = await checkInOf(shipmentId);
+    if (!checkInId) throw new HttpError(409, 'Check the parcel in first, so it is known whether its items go back on sale');
+    const shopify = await cancelShopifyOrderForReturn(sql, { checkInId, actorId: await actorId(sql, sessionUser(req)), ...(gateway ? { gateway } : {}) }).catch(asHttp);
     res.json({ shopify });
   });
 

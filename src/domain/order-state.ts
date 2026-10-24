@@ -25,7 +25,7 @@
  * | `0040` return init. | `returning`         |                                                       |
  * | `0006` returned     | `returned_received` | PostEx's receipt; the warehouse check-in is a stock event, not a state |
  * | `0002` cancelled    | `cancelled`         | cancelled by the merchant inside PostEx               |
- * | `0008` / unknown    | `in_transit` if still `booked`, otherwise no change | unknown codes are also reported as an anomaly |
+ * | `0008`, routine movement, unknown | `in_transit` if still `booked`, otherwise no change | unknown codes are also reported as an anomaly |
  *
  * A parcel always outranks a cancellation: if Shopify or the desk cancelled but a parcel was
  * booked anyway, the state follows the parcel (that is where the stock and the money are) and
@@ -93,6 +93,7 @@ const STEP: Record<string, Step> = {
   '0002': { to: 'cancelled', always: true },
   '0008': { to: 'in_transit', always: false },
 };
+/** Also the step of a known code that only names a routine movement (warehouse, hub, out for delivery, the return leg): `0040` and `0006` decide a return, not these. */
 const UNKNOWN_STEP: Step = { to: 'in_transit', always: false };
 
 /** Breaks timestamp ties so that, e.g., a return initiated and a delivery at the same second end delivered. */
@@ -152,6 +153,32 @@ export const parcelTimeline = (events: readonly ShipmentEvent[]): ParcelStep[] =
   }
   return steps;
 };
+
+/**
+ * Where a parcel stands, for screens, reports and the check-in: the parcel's own state from the
+ * replay above, in the words the screens use. `returning` covers the whole way back (0040 and the
+ * movement codes after it) until PostEx hands the parcel over (0006, `returned`); a delivery after
+ * a return started wins, as in the state.
+ */
+export const PARCEL_STAGES = ['booked', 'in_transit', 'attempted', 'delivered', 'returning', 'returned', 'cancelled'] as const;
+export type ParcelStage = (typeof PARCEL_STAGES)[number];
+
+const STAGE_OF: Partial<Record<OrderState, ParcelStage>> = {
+  booked: 'booked',
+  in_transit: 'in_transit',
+  failed: 'attempted',
+  delivered: 'delivered',
+  returning: 'returning',
+  returned_received: 'returned',
+  cancelled: 'cancelled',
+};
+
+export const parcelStage = (events: readonly ShipmentEvent[]): ParcelStage => STAGE_OF[parcelTimeline(events).at(-1)?.to ?? 'booked'] ?? 'in_transit';
+
+/** Stages after which PostEx will not move the parcel again on its own. */
+export const FINAL_STAGES: readonly ParcelStage[] = ['delivered', 'returned', 'cancelled'];
+/** Stages of a parcel whose delivery failed and that is coming back, or is back. */
+export const RETURN_STAGES: readonly ParcelStage[] = ['returning', 'returned'];
 
 /** A stretch of a parcel's history during which it stood delivered. */
 export interface DeliveryEpisode {

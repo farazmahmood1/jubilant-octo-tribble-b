@@ -12,7 +12,7 @@ export const awaitingPayout = async (db: Db, postexAccountId: string, limit: num
   const rows = await db<{ id: string; tracking_number: string }[]>`
     select s.id, s.tracking_number from shipments s
     where s.postex_account_id = ${postexAccountId}
-      and s.status_code = '0005'
+      and coalesce(s.stage = 'delivered', s.status_code = '0005')
       and not exists (select 1 from payout_lines l where l.shipment_id = s.id)
     order by s.delivered_at nulls last, s.id
     limit ${limit}

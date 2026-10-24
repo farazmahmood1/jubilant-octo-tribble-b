@@ -9,6 +9,7 @@ import {
   stockPending,
   type RefreshTiers,
   dueForRefresh,
+  fillMissingStages,
   insertEvents,
   markSynced,
   refreshDerived,
@@ -75,6 +76,7 @@ const karachiDate = (d: Date) => formatKarachi(d).slice(0, 10);
 const addDays = (ymd: string, days: number) => new Date(Date.parse(`${ymd}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
 
 interface Counts {
+  stagesFilled: number;
   listed: number;
   detailed: number;
   inserted: number;
@@ -95,6 +97,7 @@ interface Counts {
 }
 
 const emptyCounts = (): Counts => ({
+  stagesFilled: 0,
   listed: 0,
   detailed: 0,
   inserted: 0,
@@ -229,6 +232,8 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
   for (const account of deps.accounts) {
     const counts = emptyCounts();
     const reported = new Set<string>();
+    // Parcels stored before shipments.stage existed get theirs before anything reads it.
+    counts.stagesFilled = await fillMissingStages(deps.sql, account.id);
     await listNew(deps, account, now, counts, reported);
     await refreshDue(deps, account, now, counts, reported);
     if (deps.signal?.aborted) break;
@@ -251,6 +256,26 @@ export const syncPostex = async (deps: PostexDeps): Promise<JobStats> => {
   }
   stats['activeParcels'] = await activeParcels(deps.sql, deps.accounts.map((a) => a.id));
   return stats;
+};
+
+/**
+ * Re-reads one parcel from PostEx and brings everything that follows from it in line (status,
+ * history, charges, stock, order state, postings): the repair a person asks for from the returns
+ * reconciliation. The same steps as the sync, keyed the same way, so it can only add what PostEx
+ * reports and never duplicates. Returns false when PostEx did not return the parcel.
+ */
+export const resyncParcel = async (deps: Pick<PostexDeps, 'sql' | 'logger'>, account: PostexAccountTarget, shipmentId: string): Promise<boolean> => {
+  const [parcel] = await deps.sql<{ tracking_number: string }[]>`select tracking_number from shipments where id = ${shipmentId} and postex_account_id = ${account.id}`;
+  if (!parcel) return false;
+  const counts = emptyCounts();
+  const [raw] = await account.source.trackBulk([parcel.tracking_number]);
+  if (!raw) return false;
+  await storeParcel({ ...deps, accounts: [account] }, account, raw, counts, new Set());
+  await markSynced(deps.sql, [shipmentId], new Date());
+  const result = await reconcileShipmentStock(deps.sql, shipmentId);
+  if (result.orderId) await recomputeOrderState(deps.sql, result.orderId);
+  await postShipmentAccounting(deps.sql, shipmentId);
+  return true;
 };
 
 /** Configured accounts with their `postex_accounts` row. None at all is an error, not an empty success. */

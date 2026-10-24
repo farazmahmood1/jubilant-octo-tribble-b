@@ -12,7 +12,12 @@ try {
   process.exit(1);
 }
 
-const server = createApp().listen(config.port, () => {
+// Express 5 hands listen errors (EADDRINUSE, or a Windows-reserved port) to this callback instead of throwing.
+const server = createApp().listen(config.port, (error?: Error) => {
+  if (error) {
+    logger.fatal({ err: error, port: config.port }, 'Could not listen on port; not starting');
+    process.exit(1);
+  }
   logger.info(
     {
       port: config.port,

@@ -39,6 +39,8 @@ export interface WebhookDeps {
   resolveStore: (shopDomain: string) => Promise<WebhookStore | null>;
   /** Runs processing after the response is sent. Tests pass one they can await. */
   defer?: (work: () => Promise<void>) => void;
+  /** Process before answering, waiting at most this long: for a host that stops work once the answer is sent. */
+  inlineMs?: number;
 }
 
 /**

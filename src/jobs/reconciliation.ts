@@ -1,7 +1,7 @@
 import type { Sql } from '../db.js';
 import { openReviewItem, resolveOpenReviewItem } from '../db/repos/review.js';
 import { readPaisa } from '../db/repos/upsert.js';
-import type { ConfirmationState } from '../domain/order-state.js';
+import type { ConfirmationState, ParcelStage } from '../domain/order-state.js';
 import {
   type Finding,
   ORDER_RULE_KINDS,
@@ -35,6 +35,7 @@ interface Row {
   order_id: string | null;
   cod: string | null;
   status_code: string | null;
+  stage: ParcelStage | null;
   booked_at: Date | null;
   status_updated_at: Date | null;
   order_number: string | null;
@@ -66,7 +67,7 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
 
   const rows = await deps.sql<Row[]>`
     select s.id, a.key as account, a.store_id, s.tracking_number, s.order_ref_number, s.order_id, s.cod_amount_paisa::text as cod,
-           s.status_code, s.booked_at, s.status_updated_at,
+           s.status_code, s.stage, s.booked_at, s.status_updated_at,
            o.order_number, o.total_paisa::text as order_total, o.financial_status,
            case when shipment_is_pr(s.id) then 'pr' else o.channel end as channel,
            coalesce((select array_agg(distinct e.code order by e.code) from shipment_events e where e.shipment_id = s.id), '{}') as codes
@@ -80,7 +81,7 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
   const byOrder = new Map<string, SiblingFacts[]>();
   const byRef = new Map<string, SiblingFacts[]>();
   for (const row of rows) {
-    const sibling = { id: row.id, trackingNumber: row.tracking_number, statusCode: row.status_code };
+    const sibling = { id: row.id, trackingNumber: row.tracking_number, statusCode: row.status_code, stage: row.stage };
     const key = row.order_id ?? refKey(row.account, row.order_ref_number);
     const groups = row.order_id ? byOrder : byRef;
     if (key) groups.set(key, [...(groups.get(key) ?? []), sibling]);
@@ -96,6 +97,7 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
       orderId: row.order_id,
       codAmount: row.cod === null ? null : readPaisa(row.cod),
       statusCode: row.status_code,
+      stage: row.stage,
       bookedAt: row.booked_at,
       statusUpdatedAt: row.status_updated_at,
     };
@@ -117,12 +119,12 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
   const orders = await deps.sql<
     {
       id: string; store_id: string; order_number: string; placed_at: Date; cancelled_at: Date | null; fulfillment_status: string | null;
-      state: ConfirmationState | null; confirmed_at: Date | null; parcels: Array<{ id: string; trackingNumber: string; statusCode: string | null }>;
+      state: ConfirmationState | null; confirmed_at: Date | null; parcels: Array<{ id: string; trackingNumber: string; statusCode: string | null; stage: ParcelStage | null }>;
     }[]
   >`
     select o.id, o.store_id, o.order_number, o.placed_at, o.cancelled_at, o.fulfillment_status, c.state,
            coalesce(c.confirmed_at, (select min(l.at) from order_state_log l where l.order_id = o.id and l.to_state in ('confirmed', 'ready_to_book'))) as confirmed_at,
-           coalesce((select json_agg(json_build_object('id', s.id::text, 'trackingNumber', s.tracking_number, 'statusCode', s.status_code) order by s.id)
+           coalesce((select json_agg(json_build_object('id', s.id::text, 'trackingNumber', s.tracking_number, 'statusCode', s.status_code, 'stage', s.stage) order by s.id)
                      from shipments s where s.order_id = o.id), '[]') as parcels
     from orders o left join confirmations c on c.order_id = o.id
     where o.channel = 'online'

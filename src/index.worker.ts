@@ -1,4 +1,4 @@
-import { closeDb, db } from './db.js';
+import { closeDb, db, lockDb } from './db.js';
 import { prepareDatabase } from './db/prepare.js';
 import { jobs } from './jobs/registry.js';
 import { JobRunner } from './jobs/runner.js';
@@ -22,7 +22,7 @@ try {
   process.exit(1);
 }
 
-const runner = new JobRunner(sql, logger.child({ component: 'worker' }));
+const runner = new JobRunner(sql, logger.child({ component: 'worker' }), lockDb() ?? sql);
 for (const job of jobs) runner.register(job);
 runner.start();
 
