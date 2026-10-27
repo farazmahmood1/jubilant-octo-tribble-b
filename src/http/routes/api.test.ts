@@ -252,11 +252,15 @@ describe('API: reconciliation queue, stock and settings', { skip: skipWithoutDb 
   it('serves the dashboard figures and the return rate by city and by month from the reports', async () => {
     const { status, body } = await call('GET', '/reports/dashboard?from=2026-01-01&to=2026-12-31');
     assert.equal(status, 200, JSON.stringify(body));
-    for (const key of ['period', 'deliveredRevenue', 'profit', 'returnRate', 'deliverySuccess', 'cash', 'profitPerParcel']) assert.ok(key in body, key);
+    for (const key of ['period', 'deliveredRevenue', 'profit', 'returnRate', 'deliverySuccess', 'cash', 'codSettlement', 'profitPerParcel']) assert.ok(key in body, key);
     // Money travels as paisa strings, never numbers.
     assert.equal(typeof (body['deliveredRevenue'] as Record<string, unknown>)['total'], 'string');
     assert.equal(typeof (body['profit'] as Record<string, unknown>)['netProfit'], 'string');
     assert.equal((body['cash'] as { asOf: string }).asOf, '2026-12-31');
+    // What was sold is what PostEx paid, kept as charges, or still holds.
+    const cod = body['codSettlement'] as { asOf: string; sold: string; received: string; charges: string; withPostex: string };
+    assert.equal(cod.asOf, '2026-12-31');
+    assert.equal(BigInt(cod.sold), BigInt(cod.received) + BigInt(cod.charges) + BigInt(cod.withPostex));
     // The profit tile is the P&L's own bottom line.
     const pnl = await call('GET', '/reports/pnl?from=2026-01-01&to=2026-12-31');
     assert.equal((body['profit'] as { netProfit: string }).netProfit, pnl.body['netProfit']);
@@ -274,6 +278,19 @@ describe('API: reconciliation queue, stock and settings', { skip: skipWithoutDb 
     }
     assert.equal((await call('GET', '/reports/return-rate?by=colour')).status, 400);
     assert.equal((await call('GET', '/reports/dashboard?from=2026-02-30')).status, 400);
+  });
+
+  it('serves the payments of the last day by default, in paisa strings, and refuses a window it does not know', async () => {
+    const { status, body } = await call('GET', '/reports/payments');
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body['window'], '24h');
+    // Instants travel as ISO text: a Date walked like a plain object would arrive as {}.
+    for (const key of ['since', 'until']) assert.ok(!Number.isNaN(Date.parse(String(body[key]))), `${key}: ${JSON.stringify(body[key])}`);
+    assert.ok(body['lastPaidAt'] === null || !Number.isNaN(Date.parse(String(body['lastPaidAt']))), `lastPaidAt: ${JSON.stringify(body['lastPaidAt'])}`);
+    assert.ok(Array.isArray(body['rows']));
+    assert.equal(typeof (body['totals'] as Record<string, unknown>)['profit'], 'string');
+    assert.equal((await call('GET', '/reports/payments?window=7d&store=organics')).status, 200);
+    assert.equal((await call('GET', '/reports/payments?window=forever')).status, 400);
   });
 
   it('reads the alert thresholds with their defaults, saves a change, audits it, and refuses nonsense', async () => {

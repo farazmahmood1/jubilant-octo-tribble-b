@@ -141,6 +141,16 @@ describe('API: Confirmations', { skip: skipWithoutDb }, () => {
     assert.deepEqual(alerts.map((a) => [a['kind'], a['orderId'], a['store']]), [['confirmed_not_booked', orderId, 'nur']]);
   });
 
+  it('clears the alert once the booking app tags the order PostEx, as the desk counts it booked', async () => {
+    await s.schema.sql`update orders set tags = array_append(tags, 'PostEx') where id = ${orderId}`;
+    try {
+      await scanReconciliation({ sql: s.schema.sql, logger: pino({ level: 'silent' }) as unknown as Logger, now: () => new Date(Date.now() + 25 * 3_600_000) });
+      assert.deepEqual((await call('GET', '/confirmations/alerts')).body['alerts'], []);
+    } finally {
+      await s.schema.sql`update orders set tags = array_remove(tags, 'PostEx') where id = ${orderId}`;
+    }
+  });
+
   it('with tag writing switched off, a change is refused before Shopify is called', async () => {
     const off = createApp({ sql: () => s.schema.sql, webhooks: () => null, confirmations: { shopify, writeTags: false } }).listen(0);
     try {

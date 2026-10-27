@@ -4,12 +4,15 @@ import { z } from 'zod';
 import { endOfKarachiDay } from '../../lib/time.js';
 import {
   DIMENSIONS,
+  PAYMENT_WINDOW_KEYS,
   breakdown,
   cashAwaitingPayout,
+  codSettlement,
   deliveredRevenue,
   deliverySuccess,
   netProfit,
   orderFunnel,
+  paymentsReport,
   profitPerParcel,
   recentOrders,
   returnRate,
@@ -75,10 +78,13 @@ const linesQuery = filterQuery.extend({
 });
 
 const returnRateQuery = filterQuery.extend({ by: z.enum(['city', 'month']).default('city') });
+const paymentsQuery = z.object({ window: z.enum(PAYMENT_WINDOW_KEYS).default('24h'), store: z.enum(['nur', 'organics']).optional() });
 
-/** Bigints (paisa) as decimal strings, everywhere in a response. */
+/** Bigints (paisa) as decimal strings, everywhere in a response; instants as ISO text, as `res.json` writes them. */
 const json = (value: unknown): unknown => {
   if (typeof value === 'bigint') return value.toString();
+  // A Date is an object with no own keys: walked like the rest, it would arrive as `{}`.
+  if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(json);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, json(v)]));
   return value;
@@ -104,20 +110,22 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
 
   /**
    * The dashboard's headline figures for one period and brand, each from the same report function
-   * its own screen uses, so a tile and the report behind it cannot disagree. Cash with PostEx is as
-   * of the period's last day (today, when the period is open-ended).
+   * its own screen uses, so a tile and the report behind it cannot disagree. Cash with PostEx, and
+   * where the COD on the period's deliveries has gone, are as of the period's last day (today, when
+   * the period is open-ended).
    */
   router.get('/reports/dashboard', async (req, res) => {
     const sql = requireSql(getSql);
     const f = filterOf(parse(filterQuery, req.query));
     const asOf = f.to ?? todayInKarachi();
-    const [orderSales, revenue, profit, returns, delivery, cash, perParcel] = await Promise.all([
+    const [orderSales, revenue, profit, returns, delivery, cash, settlement, perParcel] = await Promise.all([
       sales(sql, f),
       deliveredRevenue(sql, f),
       netProfit(sql, f),
       returnRate(sql, f),
       deliverySuccess(sql, f),
       cashAwaitingPayout(sql, { ...f, to: asOf }),
+      codSettlement(sql, { ...f, to: asOf }),
       profitPerParcel(sql, f),
     ]);
     res.json(
@@ -136,6 +144,7 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
         },
         deliverySuccess: delivery,
         cash,
+        codSettlement: settlement,
         // The per-parcel rows are the report's own screen; the tile needs only the totals.
         profitPerParcel: { parcels: perParcel.parcels, total: perParcel.total, average: perParcel.average },
       }),
@@ -156,6 +165,12 @@ export const reportsRouter = (getSql: SqlProvider): Router => {
     const f = filterOf(parse(filterQuery, req.query));
     const rows = await recentOrders(requireSql(getSql), f.store ? { store: f.store } : {}, { customers: can(role, 'orders.read') });
     res.json({ rows });
+  });
+
+  /** What PostEx paid in the last 24 hours, 7, 14 or 30 days, order by order, with the charges it kept and the profit on each. */
+  router.get('/reports/payments', async (req, res) => {
+    const q = parse(paymentsQuery, req.query);
+    res.json(json(await paymentsReport(requireSql(getSql), { window: q.window, ...(q.store ? { store: q.store } : {}) })));
   });
 
   /** Return rate by delivery city or by booking month, same definition as the headline rate. */

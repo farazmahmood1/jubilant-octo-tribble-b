@@ -5,10 +5,13 @@ import { toShipment, toShipmentEvents } from '../integrations/postex/mapper.js';
 import { type Paisa, paisa } from '../lib/money.js';
 import { fixture } from '../test/fixtures.js';
 import {
+  type OrderAlertFacts,
   type OrderFacts,
+  type OrderRuleInput,
   type ParcelFacts,
   type RuleInput,
   codMismatch,
+  confirmedNotBooked,
   duplicateBooking,
   evaluate,
   stuckInTransit,
@@ -179,5 +182,41 @@ describe('evaluate', () => {
     assert.deepEqual(evaluate(input('delivered')), []);
     const kinds = evaluate(input('unknown-status', { parcel: { orderId: null }, order: null })).map((f) => f.kind);
     assert.deepEqual(kinds, ['unmatched_shipment', 'stuck_in_transit', 'postex_unknown_status']);
+  });
+});
+
+describe('confirmed_not_booked', () => {
+  const now = new Date('2026-10-27T12:00:00Z');
+  const facts = (overrides: Partial<OrderAlertFacts> = {}): OrderRuleInput => ({
+    order: {
+      id: '322',
+      orderNumber: '#64638',
+      placedAt: new Date('2026-09-30T11:17:52Z'),
+      confirmation: 'confirmed',
+      confirmedAt: new Date('2026-10-22T11:56:55Z'),
+      cancelledInShopify: false,
+      onHold: false,
+      taggedBooked: false,
+      parcels: [],
+      ...overrides,
+    },
+    now,
+    confirmedNotBookedHours: 24,
+    lookbackDays: 30,
+  });
+
+  it('flags an order confirmed a day ago with no parcel and no sign of booking', () => {
+    assert.equal(confirmedNotBooked(facts())?.detail['hoursWaiting'], 120);
+  });
+
+  it('does not flag one the booking app tagged PostEx, though its parcel is not on file (booked before the PostEx history starts)', () => {
+    assert.equal(confirmedNotBooked(facts({ taggedBooked: true })), null);
+  });
+
+  it('does not flag one cancelled in Shopify, on hold, with a parcel, or confirmed less than a day ago', () => {
+    assert.equal(confirmedNotBooked(facts({ cancelledInShopify: true })), null);
+    assert.equal(confirmedNotBooked(facts({ onHold: true })), null);
+    assert.equal(confirmedNotBooked(facts({ parcels: [{ id: '1', trackingNumber: '26632200001195', statusCode: '0005' }] })), null);
+    assert.equal(confirmedNotBooked(facts({ confirmedAt: new Date('2026-10-27T01:00:00Z') })), null);
   });
 });

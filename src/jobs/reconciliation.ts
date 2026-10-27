@@ -1,7 +1,9 @@
 import type { Sql } from '../db.js';
+import { tagWords } from '../db/repos/confirmations.js';
 import { openReviewItem, resolveOpenReviewItem } from '../db/repos/review.js';
 import { readPaisa } from '../db/repos/upsert.js';
 import type { ConfirmationState, ParcelStage } from '../domain/order-state.js';
+import { BOOKED_TAG } from '../domain/order-tags.js';
 import {
   type Finding,
   ORDER_RULE_KINDS,
@@ -118,11 +120,11 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
   // The desk's alerts: only orders that could raise one are read.
   const orders = await deps.sql<
     {
-      id: string; store_id: string; order_number: string; placed_at: Date; cancelled_at: Date | null; fulfillment_status: string | null;
+      id: string; store_id: string; order_number: string; placed_at: Date; cancelled_at: Date | null; fulfillment_status: string | null; tags: string[];
       state: ConfirmationState | null; confirmed_at: Date | null; parcels: Array<{ id: string; trackingNumber: string; statusCode: string | null; stage: ParcelStage | null }>;
     }[]
   >`
-    select o.id, o.store_id, o.order_number, o.placed_at, o.cancelled_at, o.fulfillment_status, c.state,
+    select o.id, o.store_id, o.order_number, o.placed_at, o.cancelled_at, o.fulfillment_status, o.tags, c.state,
            coalesce(c.confirmed_at, (select min(l.at) from order_state_log l where l.order_id = o.id and l.to_state in ('confirmed', 'ready_to_book'))) as confirmed_at,
            coalesce((select json_agg(json_build_object('id', s.id::text, 'trackingNumber', s.tracking_number, 'statusCode', s.status_code, 'stage', s.stage) order by s.id)
                      from shipments s where s.order_id = o.id), '[]') as parcels
@@ -146,6 +148,7 @@ export const scanReconciliation = async (deps: ScanDeps): Promise<JobStats> => {
       confirmedAt: o.confirmed_at,
       cancelledInShopify: o.cancelled_at !== null,
       onHold: o.fulfillment_status === 'on_hold',
+      taggedBooked: o.tags.some((t) => tagWords(t) === tagWords(BOOKED_TAG)),
       parcels: o.parcels,
     };
     for (const finding of evaluateOrder({ order, ...orderRules })) {

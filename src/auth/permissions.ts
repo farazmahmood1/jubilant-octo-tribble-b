@@ -33,6 +33,7 @@ export const PERMISSIONS = [
   'pr.read',
   'accounting.read',
   'reports.read',
+  'payments.read',
   'integrations.read',
   // Doing
   'confirmations.work',
@@ -80,7 +81,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   // Works the phones: the confirmation desk, and the phone numbers it needs.
   agent: ['orders.read', 'confirmations.work', 'pii.phone'],
   // Reads the books and closes months. Never sees a customer's phone number.
-  accountant: ['dashboard.read', 'reconciliation.read', 'purchasing.read', 'partners.read', 'accounting.read', 'accounting.close', 'reports.read'],
+  accountant: ['dashboard.read', 'reconciliation.read', 'purchasing.read', 'partners.read', 'accounting.read', 'accounting.close', 'reports.read', 'payments.read'],
 };
 
 export const permissionsOf = (role: Role): readonly Permission[] => ROLE_PERMISSIONS[role];
@@ -113,6 +114,8 @@ export const ROUTE_POLICY: readonly Rule[] = [
   // The dashboard's headline reads, ahead of the broader rules they would otherwise fall under.
   { path: /^\/reports\/(dashboard|return-rate|funnel)$/, read: 'dashboard.read' },
   { path: /^\/reports\/breakdowns\/month$/, read: 'dashboard.read' },
+  // The Payments screen: each PostEx payment and the profit on it, ahead of the reports it would otherwise fall under.
+  { path: /^\/reports\/payments$/, read: 'payments.read' },
   { path: /^\/reconciliation\/summary$/, read: ['reconciliation.read', 'dashboard.read'] },
   { path: /^\/stock\/returns-awaiting$/, read: ['returns.read', 'dashboard.read'] },
   { path: /^\/integrations\/status$/, read: ['integrations.read', 'dashboard.read'] },

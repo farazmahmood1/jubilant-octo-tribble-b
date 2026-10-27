@@ -190,7 +190,7 @@ export const confirmationsRouter = (getSql: SqlProvider, options: ConfirmationsO
     res.json({ history });
   });
 
-  /** The two alerts, open, oldest first. The scan raises and clears them hourly. */
+  /** The two alerts, open, oldest first. The scan raises and clears them with every sync. */
   router.get('/confirmations/alerts', async (_req, res) => {
     const sql = requireSql(getSql);
     const rows = await sql<{ id: string; kind: string; severity: string; order_id: string | null; store: string | null; detail: Record<string, unknown>; created_at: Date }[]>`

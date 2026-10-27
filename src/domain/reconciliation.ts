@@ -186,7 +186,7 @@ export const evaluate = (input: RuleInput): Finding[] =>
 /**
  * | Rule                 | Flags when                                                                                  | Does NOT flag                                                       |
  * |----------------------|---------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
- * | confirmed_not_booked | confirmed (or changed) `confirmedNotBookedHours` or more ago, and no parcel booked           | an order on hold in Shopify; one placed before the lookback window  |
+ * | confirmed_not_booked | confirmed (or changed) `confirmedNotBookedHours` or more ago, and no parcel booked           | an order on hold in Shopify; one placed before the lookback window; one the booking app tagged `PostEx` (booked, as the desk counts it, even with no parcel on file) |
  * | cancelled_but_booked | cancelled in Shopify or at the desk, and a parcel is still out (not cancelled, returning or returned) | a parcel PostEx cancelled, or one already on its way back           |
  */
 export const ORDER_RULE_KINDS = ['confirmed_not_booked', 'cancelled_but_booked'] as const;
@@ -201,6 +201,12 @@ export interface OrderAlertFacts {
   confirmedAt: Date | null;
   cancelledInShopify: boolean;
   onHold: boolean;
+  /**
+   * The booking app tagged it `PostEx` in Shopify. The desk counts that as booked, so this rule
+   * does too: a parcel booked before the PostEx history on file starts is never synced, and its
+   * order would otherwise be flagged forever.
+   */
+  taggedBooked: boolean;
   parcels: ReadonlyArray<{ id: string; trackingNumber: string; statusCode: string | null; stage?: ParcelStage | null }>;
 }
 
@@ -216,7 +222,7 @@ const STILL_OUT = (p: Positioned) => !isSettledAway(p);
 
 export const confirmedNotBooked = ({ order, now, confirmedNotBookedHours, lookbackDays }: OrderRuleInput): Finding | null => {
   if (order.confirmation !== 'confirmed' && order.confirmation !== 'changed') return null;
-  if (order.cancelledInShopify || order.onHold || order.parcels.length > 0 || !order.confirmedAt) return null;
+  if (order.cancelledInShopify || order.onHold || order.taggedBooked || order.parcels.length > 0 || !order.confirmedAt) return null;
   if (now.getTime() - order.placedAt.getTime() > lookbackDays * 86_400_000) return null;
   const hours = Math.floor((now.getTime() - order.confirmedAt.getTime()) / 3_600_000);
   if (hours < confirmedNotBookedHours) return null;

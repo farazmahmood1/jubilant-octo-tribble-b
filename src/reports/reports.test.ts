@@ -12,6 +12,7 @@ import {
   REPORT_PLANS,
   breakdown,
   cashAwaitingPayout,
+  codSettlement,
   deliveredRevenue,
   deliverySuccess,
   drillBreakdown,
@@ -27,6 +28,7 @@ import {
   generalLedger,
   netProfit,
   partnerLedger,
+  paymentsReport,
   pnl,
   productBreakdown,
   profitPerParcel,
@@ -225,6 +227,36 @@ describe('reports over one mixed dataset', { skip: skipWithoutDb }, () => {
     // Before PostEx paid A, A was still awaited; the customer return was already reversed (09-08).
     assert.equal((await cashAwaitingPayout(s.schema.sql, { to: '2026-09-09' })).awaiting, rs(2518 + 2968));
     assert.equal((await cashAwaitingPayout(s.schema.sql, { to: '2026-09-07' })).awaiting, rs(2518 + 2968 + 1800));
+  });
+
+  it('splits the COD on the period\'s deliveries into received, PostEx charges and still with PostEx', async () => {
+    const all = await codSettlement(s.schema.sql, { to: '2026-09-20' });
+    // A, B and Organics: the customer return's sale was reversed, and the PR parcels never had one.
+    assert.deepEqual([all.parcels, all.sold, all.received, all.charges, all.withPostex], [3, rs(2750 + 3200 + 1500), rs(2518), rs(464), rs(4468)]);
+    assert.equal(all.withPostex, (await cashAwaitingPayout(s.schema.sql, { to: '2026-09-20' })).awaiting, 'over all time it is the cash awaiting payout');
+    // A was delivered on 09-03, before the period: only B is left on NUR.
+    const later = await codSettlement(s.schema.sql, { from: '2026-09-04', to: '2026-09-20', store: 'nur' });
+    assert.deepEqual([later.parcels, later.sold, later.received, later.charges, later.withPostex], [1, rs(3200), rs(0), rs(232), rs(2968)]);
+    // Before PostEx paid A (09-10), A's COD less its charges was still with PostEx; Organics was not yet delivered.
+    const early = await codSettlement(s.schema.sql, { to: '2026-09-09' });
+    assert.deepEqual([early.parcels, early.sold, early.received, early.withPostex], [2, rs(5950), rs(0), rs(2518 + 2968)]);
+  });
+
+  it('lists what PostEx paid in the window, order by order, with the charges it kept and the profit on each', async () => {
+    // CPR-1 paid A at 07:00 on 09-10: its COD less the forward charge and tax; the profit is the parcel's own.
+    const day = await paymentsReport(s.schema.sql, { window: '24h', now: new Date('2026-09-10T12:00:00Z') });
+    assert.deepEqual(
+      day.rows.map((r) => [r.orderNumber, r.trackingNumbers.length, r.cprNumbers, r.payment, r.cod, r.deliveryFee, r.deliveryTax, r.goods, r.profit]),
+      [['#A', 1, ['CPR-1'], rs(2518), rs(2750), rs(200), rs(32), rs(900), rs(1618)]],
+    );
+    assert.deepEqual([day.totals.orders, day.totals.payment, day.totals.profit], [1, rs(2518), rs(1618)]);
+    // Two days on, the payment is outside the last day but inside the last week, and on NUR only.
+    const later = new Date('2026-09-12T12:00:00Z');
+    const empty = await paymentsReport(s.schema.sql, { window: '24h', now: later });
+    assert.equal(empty.rows.length, 0);
+    assert.equal(empty.lastPaidAt?.toISOString(), '2026-09-10T07:00:00.000Z', 'an empty day still says when PostEx last paid');
+    assert.equal((await paymentsReport(s.schema.sql, { window: '7d', now: later })).rows.length, 1);
+    assert.equal((await paymentsReport(s.schema.sql, { window: '7d', store: 'organics', now: later })).rows.length, 0);
   });
 
   it('profit per parcel from its own lines: revenue less goods, PostEx charges and write-offs', async () => {

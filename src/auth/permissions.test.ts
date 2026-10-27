@@ -121,6 +121,7 @@ describe('what each role may do, through the policy', () => {
     ['GET', '/reports/pnl', ['owner', 'manager', 'accountant'], ['operations', 'agent']],
     ['GET', '/reports/dashboard', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
     ['GET', '/reports/funnel', ['owner', 'manager', 'operations', 'accountant'], ['agent']],
+    ['GET', '/reports/payments', ['owner', 'manager', 'accountant'], ['operations', 'agent']],
     ['GET', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
     ['PUT', '/settings/alerts', ['owner', 'manager'], ['operations', 'agent', 'accountant']],
     ['GET', '/users', ['owner'], ['manager', 'operations', 'agent', 'accountant']],
