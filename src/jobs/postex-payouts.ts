@@ -72,7 +72,8 @@ export const syncPayouts = async (deps: Omit<PostexDeps, 'tiers' | 'historyFrom'
 
 export const payoutsJob: JobDefinition = {
   name: PAYOUTS_JOB,
-  // Daily. PostEx pays out a few times a week; a day's delay in seeing it costs nothing.
-  schedule: { everyMs: 24 * 60 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT },
+  // Every 30 minutes: a payout shows the same half hour PostEx makes it. Each run asks about the
+  // parcels still unpaid only, one a second, so it stays a minute or two of PostEx's time.
+  schedule: { everyMs: 30 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT },
   handler: async ({ sql, logger, signal }) => syncPayouts({ sql, logger, signal, accounts: await configuredPostexAccounts(sql) }),
 };

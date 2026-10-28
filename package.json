@@ -30,7 +30,8 @@
     "match:report": "tsx src/scripts/match-report.ts",
     "accounting:replay": "tsx src/scripts/accounting-replay.ts",
     "orders:states": "tsx src/scripts/order-states.ts",
-    "orders:import": "tsx src/scripts/import-orders.ts"
+    "orders:import": "tsx src/scripts/import-orders.ts",
+    "webhooks": "tsx src/scripts/webhooks.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

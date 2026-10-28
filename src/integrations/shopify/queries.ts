@@ -35,25 +35,54 @@ export const LOCATIONS_PER_VARIANT = 10;
  * separate pass from the products query: nesting levels inside variants inside products would
  * exceed Shopify's query cost limit.
  */
+const VARIANT_INVENTORY_FIELDS = `
+  id
+  inventoryItem {
+    tracked
+    unitCost { amount currencyCode }
+    inventoryLevels(first: ${LOCATIONS_PER_VARIANT}) {
+      pageInfo { hasNextPage }
+      nodes {
+        location { id name }
+        quantities(names: ["on_hand", "available", "committed"]) { name quantity }
+      }
+    }
+  }
+`;
+
 export const VARIANT_INVENTORY_QUERY = `
   query VariantInventory($first: Int!, $after: String) {
     productVariants(first: $first, after: $after, sortKey: ID) {
       pageInfo { hasNextPage endCursor }
-      nodes {
-        id
-        inventoryItem {
-          tracked
-          unitCost { amount currencyCode }
-          inventoryLevels(first: ${LOCATIONS_PER_VARIANT}) {
-            pageInfo { hasNextPage }
-            nodes {
-              location { id name }
-              quantities(names: ["on_hand", "available", "committed"]) { name quantity }
-            }
-          }
-        }
-      }
+      nodes { ${VARIANT_INVENTORY_FIELDS} }
     }
+  }
+`;
+
+/** One product and its variants: what a product webhook re-reads, so one change does not wait for the full scan. */
+export const PRODUCT_QUERY = `
+  query Product($id: ID!) {
+    product(id: $id) {
+      id title vendor status
+      variants(first: ${NESTED_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { ${VARIANT_FIELDS} } }
+    }
+  }
+`;
+
+/** Variants per inventory request by id: the same page size as the inventory pass, for the same reason. */
+export const VARIANTS_BY_ID_PAGE = INVENTORY_PAGE_SIZE;
+
+/** Cost and stock of the given variants. */
+export const VARIANTS_INVENTORY_BY_ID_QUERY = `
+  query VariantsInventory($ids: [ID!]!) {
+    nodes(ids: $ids) { ... on ProductVariant { ${VARIANT_INVENTORY_FIELDS} } }
+  }
+`;
+
+/** The product a stock item belongs to: inventory webhooks name the item, not the product. */
+export const INVENTORY_ITEM_PRODUCT_QUERY = `
+  query InventoryItemProduct($id: ID!) {
+    inventoryItem(id: $id) { variant { product { id } } }
   }
 `;
 
@@ -93,6 +122,11 @@ const ORDER_FIELDS = `
   totalShippingPriceSet { ${MONEY} }
   totalTaxSet { ${MONEY} }
   totalPriceSet { ${MONEY} }
+  currentSubtotalPriceSet { ${MONEY} }
+  currentTotalDiscountsSet { ${MONEY} }
+  currentShippingPriceSet { ${MONEY} }
+  currentTotalTaxSet { ${MONEY} }
+  currentTotalPriceSet { ${MONEY} }
   totalRefundedSet { ${MONEY} }
   shippingAddress { name phone address1 address2 city province zip countryCodeV2 }
   refunds(first: 5) { ${REFUND_FIELDS} }

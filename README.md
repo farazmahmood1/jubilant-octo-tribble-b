@@ -145,10 +145,10 @@ History steps are inserted with the unique `(shipment, code, time)` key doing th
 re-run adds no rows. A parcel's status, attempts and last failure reason are derived from all its
 stored steps, in event-time order. An unknown status code is reported once to the review queue.
 
-`npm run job -- postex:payouts` (daily) asks PostEx's payment status for delivered parcels not
+`npm run job -- postex:payouts` (every 30 minutes) asks PostEx's payment status for delivered and returned parcels not
 yet on a payout, oldest first, up to 600 per account per run. A settled parcel is recorded under
-its CPR in `cod_payouts`, with a `payout_lines` row worth its COD less the forward charge and
-tax; the payout's amount is the sum of its lines.
+its CPR in `cod_payouts`, with a `payout_lines` row worth its COD less its charges and their
+tax (a returned parcel collected nothing: its line is minus its return charge, which PostEx takes off the payout); the payout's amount is the sum of its lines.
 
 To reconcile after a sync: `npm run postex:totals -- 2026-05-14 2026-09-19` and compare with
 877 delivered, 117 returned, PKR 209,009 forward and PKR 27,787 return charges (fees and their
@@ -556,11 +556,11 @@ so any mix of them never runs a job twice side by side:
    every 2 minutes, with that header). `CRON_BUDGET_MS` (default 240 s) keeps a call under the
    function limit; jobs stop at a batch boundary and resume from their cursors.
 3. **Shopify webhooks**, processed before the answer on Vercel (`inlineMs`), since work after it
-   may never run. None are registered yet: `webhook_events` is empty.
+   may never run. Registered with `npm run webhooks -- <backend URL> --apply` (rerun when the URL changes).
 
 Every Shopify and PostEx job runs every 2 minutes, around the clock (`SYNC_EVERY_MS` in
 `src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `postex:sync`,
-`reconciliation:scan` and `pr:detect`. `postex:payouts` stays daily. Neon therefore never gets to
+`reconciliation:scan` and `pr:detect`. `postex:payouts` runs every 30 minutes. Neon therefore never gets to
 suspend its compute while the worker runs; that is the cost of the freshness (risk R3).
 
 `npm run dev` starts the worker with the API; in production the worker is its own Render service

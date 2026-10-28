@@ -144,12 +144,16 @@ const upsertHeader = async (db: Db, input: OrderInput): Promise<UpsertResult> =>
       : db`store_id = ${input.storeId} and shopify_order_id = ${big(input.shopifyOrderId)}`;
   const updatable = Object.keys(values).filter((c) => c !== 'store_id' && c !== 'shopify_order_id');
 
-  const [row] = await db<Returned[]>`
-    with prev as (select to_jsonb(o) - 'updated_at' as doc from orders o where ${prevWhere})
+  const [row] = await db<Array<Returned & { amounts_changed: boolean }>>`
+    with prev as (select to_jsonb(o) - 'updated_at' as doc, o.total_paisa, o.tax_paisa from orders o where ${prevWhere})
     insert into orders ${db(values)}
     on conflict ${key} do update set ${db.unsafe(updatable.map((c) => `${c} = excluded.${c}`).join(', '))}
-    returning id, (xmax = 0) as inserted, (select doc from prev) is distinct from (to_jsonb(orders) - 'updated_at') as changed
+    returning id, (xmax = 0) as inserted, (select doc from prev) is distinct from (to_jsonb(orders) - 'updated_at') as changed,
+              ((select total_paisa from prev) is distinct from orders.total_paisa or (select tax_paisa from prev) is distinct from orders.tax_paisa) as amounts_changed
   `;
+  // The sale of a delivered parcel is posted from the order's total and tax: when an edit changes
+  // them, its parcels go back to the accounting pass, which brings the sale in line.
+  if (row && !row.inserted && row.amounts_changed) await db`update shipments set accounting_pending = true where order_id = ${row.id} and not accounting_pending`;
   return toUpsertResult(row);
 };
 

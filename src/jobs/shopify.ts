@@ -22,13 +22,17 @@ import {
   mapVariantInventory,
 } from '../integrations/shopify/mapper.js';
 import {
+  INVENTORY_ITEM_PRODUCT_QUERY,
   ORDERS_QUERY,
   ORDER_LINES_QUERY,
   ORDER_QUERY,
   PAGE_SIZE,
   INVENTORY_PAGE_SIZE,
   PRODUCTS_QUERY,
+  PRODUCT_QUERY,
   PRODUCT_VARIANTS_QUERY,
+  VARIANTS_BY_ID_PAGE,
+  VARIANTS_INVENTORY_BY_ID_QUERY,
   VARIANT_INVENTORY_QUERY,
 } from '../integrations/shopify/queries.js';
 import { formatKarachi } from '../lib/time.js';
@@ -224,31 +228,104 @@ export const syncCatalogue = async (deps: SyncDeps): Promise<JobStats> => {
 const syncInventory = async (deps: SyncDeps, store: StoreTarget, counts: Counts): Promise<void> => {
   const variantIds = await loadVariantIds(deps.sql, store.id);
   const now = (deps.now ?? (() => new Date()))();
-  const today = formatKarachi(now).slice(0, 10);
   let after: string | null = null;
   do {
     if (deps.signal?.aborted) return;
     const data: { productVariants: Connection<ShopifyVariantInventoryNode> } = await store.graphql(VARIANT_INVENTORY_QUERY, { first: INVENTORY_PAGE_SIZE, after });
-    for (const node of data.productVariants.nodes) {
-      let inventory;
-      try {
-        inventory = mapVariantInventory(node);
-      } catch (error) {
-        bump(counts, 'inventorySkipped');
-        deps.logger.warn({ store: store.key, variant: node.id, err: error }, 'Variant inventory skipped');
-        continue;
-      }
-      const variantId = variantIds.get(String(inventory.shopifyVariantId));
-      if (!variantId) continue;
-      const cost = await importShopifyCost(deps.sql, variantId, inventory.unitCost, today);
-      if (cost === 'first') bump(counts, 'costsAdded');
-      if (cost === 'changed') bump(counts, 'costsChanged');
-      if (cost === 'none' && inventory.tracked) bump(counts, 'noCost');
-      await replaceStockLevels(deps.sql, store.id, variantId, inventory, now);
-      if (inventory.levelsTruncated) bump(counts, 'levelsTruncated');
-    }
+    for (const node of data.productVariants.nodes) await storeVariantInventory(deps, store, node, variantIds, now, counts);
     after = data.productVariants.pageInfo.hasNextPage ? data.productVariants.pageInfo.endCursor : null;
   } while (after);
+};
+
+/** One variant's cost and stock levels, as the inventory pass and a product webhook both store them. */
+const storeVariantInventory = async (
+  deps: Pick<SyncDeps, 'sql' | 'logger'>,
+  store: StoreTarget,
+  node: ShopifyVariantInventoryNode,
+  variantIds: Map<string, string>,
+  now: Date,
+  counts: Counts,
+): Promise<void> => {
+  let inventory;
+  try {
+    inventory = mapVariantInventory(node);
+  } catch (error) {
+    bump(counts, 'inventorySkipped');
+    deps.logger.warn({ store: store.key, variant: node.id, err: error }, 'Variant inventory skipped');
+    return;
+  }
+  const variantId = variantIds.get(String(inventory.shopifyVariantId));
+  if (!variantId) return;
+  const cost = await importShopifyCost(deps.sql, variantId, inventory.unitCost, formatKarachi(now).slice(0, 10));
+  if (cost === 'first') bump(counts, 'costsAdded');
+  if (cost === 'changed') bump(counts, 'costsChanged');
+  if (cost === 'none' && inventory.tracked) bump(counts, 'noCost');
+  await replaceStockLevels(deps.sql, store.id, variantId, inventory, now);
+  if (inventory.levelsTruncated) bump(counts, 'levelsTruncated');
+};
+
+/**
+ * One product re-read whole, for a product or inventory webhook: the product, its variants, and
+ * each variant's cost per item and stock, stored exactly as the full catalogue scan stores them,
+ * so a change in Shopify is here in seconds instead of at the next scan. A product Shopify no
+ * longer has is marked deleted with its variants, as the scan would. Returns whether it exists.
+ */
+export const resyncProduct = async (deps: Pick<SyncDeps, 'sql' | 'logger' | 'now'>, store: StoreTarget, productGid: string): Promise<boolean> => {
+  const data = await store.graphql<{ product: ShopifyProductNode | null }>(PRODUCT_QUERY, { id: productGid });
+  if (!data.product) {
+    await markProductDeleted(deps.sql, store, productGid);
+    return false;
+  }
+  const node = data.product;
+  const variants = await restOf<ShopifyVariantNode>(store.graphql, PRODUCT_VARIANTS_QUERY, node.id, node.variants, (d) =>
+    (d['product'] as { variants?: Connection<ShopifyVariantNode> } | null)?.variants,
+  );
+  const mapped = mapProduct(node, variants);
+  const product = await upsertProduct(deps.sql, { storeId: store.id, ...mapped.product });
+  for (const variant of mapped.variants) {
+    try {
+      await upsertVariant(deps.sql, { storeId: store.id, productId: product.id, ...variant });
+    } catch (error) {
+      // A duplicate SKU, most likely: the full scan reports it with the rest.
+      deps.logger.warn({ store: store.key, shopifyVariantId: String(variant.shopifyVariantId), err: error }, 'Variant skipped');
+    }
+  }
+  const seen = mapped.variants.map((v) => String(v.shopifyVariantId));
+  await deps.sql`
+    update variants set deleted_at = now()
+    where product_id = ${product.id} and deleted_at is null and not (shopify_variant_id::text = any(${seen}::text[]))
+  `;
+  const variantIds = await loadVariantIds(deps.sql, store.id);
+  const now = (deps.now ?? (() => new Date()))();
+  const counts = emptyCounts();
+  for (let i = 0; i < variants.length; i += VARIANTS_BY_ID_PAGE) {
+    const ids = variants.slice(i, i + VARIANTS_BY_ID_PAGE).map((v) => v.id);
+    const levels = await store.graphql<{ nodes: Array<ShopifyVariantInventoryNode | null> }>(VARIANTS_INVENTORY_BY_ID_QUERY, { ids });
+    for (const level of levels.nodes) if (level) await storeVariantInventory(deps, store, level, variantIds, now, counts);
+  }
+  return true;
+};
+
+/** A product deleted in Shopify: marked deleted with its variants (order lines still refer to them). */
+export const markProductDeleted = async (sql: Sql, store: StoreTarget, productGid: string): Promise<void> => {
+  const id = productGid.split('/').pop() ?? '';
+  if (!/^\d+$/.test(id)) return;
+  await sql`
+    with gone as (
+      update products set deleted_at = now()
+      where store_id = ${store.id} and shopify_product_id = ${id}::bigint and deleted_at is null
+      returning id
+    )
+    update variants set deleted_at = now() where product_id in (select id from gone) and deleted_at is null
+  `;
+};
+
+/** The product an inventory item belongs to, for a stock or cost webhook; null when Shopify has no such item. */
+export const productOfInventoryItem = async (store: StoreTarget, inventoryItemId: string): Promise<string | null> => {
+  const data = await store.graphql<{ inventoryItem: { variant: { product: { id: string } | null } | null } | null }>(INVENTORY_ITEM_PRODUCT_QUERY, {
+    id: `gid://shopify/InventoryItem/${inventoryItemId}`,
+  });
+  return data.inventoryItem?.variant?.product?.id ?? null;
 };
 
 /** Shopify variant id → our variant id, for linking order lines. Deleted variants still link: old orders used them. */

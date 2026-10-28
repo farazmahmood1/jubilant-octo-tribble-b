@@ -121,6 +121,30 @@ describe('mapOrder', () => {
     assert.equal(mapOrder(order(1, '2026-09-01T10:00:00Z', { lineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [edited] } })).lines[0]?.qty, 0);
   });
 
+  it("takes an edited order's current amounts, not those it was placed with", () => {
+    // Order #1136 (October 2026): a Rs 1,899 item removed on the phone, PostEx collecting Rs 2,298.
+    const pkr = (amount: string) => ({ shopMoney: { amount, currencyCode: 'PKR' } });
+    const mapped = mapOrder(
+      order(1136, '2026-10-25T10:00:00Z', {
+        subtotalPriceSet: pkr('3898.00'),
+        totalPriceSet: pkr('4197.00'),
+        currentSubtotalPriceSet: pkr('1999.00'),
+        currentShippingPriceSet: pkr('299.00'),
+        currentTotalDiscountsSet: pkr('0.00'),
+        currentTotalTaxSet: pkr('0.00'),
+        currentTotalPriceSet: pkr('2298.00'),
+      }),
+    );
+    assert.equal(mapped.order.total, 229_800n);
+    assert.equal(mapped.order.subtotal, 199_900n);
+    assert.equal(mapped.order.shipping, 29_900n);
+    // An order read without the current amounts (an older payload) keeps the placed ones.
+    assert.equal(mapOrder(order(2, '2026-09-01T10:00:00Z')).order.total, 125_000n);
+    // Cancelling sets Shopify's current total to zero; a cancelled order keeps what it was placed for.
+    const cancelled = mapOrder(order(3, '2026-09-01T10:00:00Z', { cancelledAt: '2026-09-02T08:00:00Z', currentTotalPriceSet: pkr('0.00'), currentSubtotalPriceSet: pkr('0.00') }));
+    assert.equal(cancelled.order.total, 125_000n);
+  });
+
   it('maps a cancellation and an order with no address', () => {
     const mapped = mapOrder(order(1, '2026-09-01T10:00:00Z', { cancelledAt: '2026-09-02T08:00:00Z', cancelReason: 'CUSTOMER', shippingAddress: null }));
     assert.deepEqual(mapped.order.cancelledAt, new Date('2026-09-02T08:00:00Z'));

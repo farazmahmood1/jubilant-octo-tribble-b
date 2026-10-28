@@ -975,10 +975,22 @@ export const inventoryCheck = async (db: Db, asAt: string): Promise<InventoryChe
     having sum(m.units) <> 0
     order by p.title, v.title
   `;
+  // Each variant's cost on that day, the newest row on or before it (as costAt reads it), in one
+  // query: one round trip per variant made the check take seconds against a remote database.
+  const costs = new Map(
+    (
+      await db<{ variant_id: string; unit_cost_paisa: string }[]>`
+        select distinct on (variant_id) variant_id::text, unit_cost_paisa::text
+        from product_costs
+        where variant_id = any(${rows.map((r) => r.variant_id)}::bigint[]) and effective_from <= ${asAt}
+        order by variant_id, effective_from desc, id desc
+      `
+    ).map((c) => [c.variant_id, BigInt(c.unit_cost_paisa)]),
+  );
   let stockValue = ZERO;
   const missingCost: InventoryCheck['missingCost'] = [];
   for (const row of rows) {
-    const cost = await costAt(db, row.variant_id, end);
+    const cost = costs.get(String(row.variant_id)) ?? null;
     if (cost === null) {
       missingCost.push({ variantId: row.variant_id, sku: row.sku, title: row.title, units: row.units });
       continue;

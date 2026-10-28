@@ -67,6 +67,15 @@ export interface ShopifyOrderNode {
   totalShippingPriceSet: MoneySet | null;
   totalTaxSet: MoneySet | null;
   totalPriceSet: MoneySet;
+  /**
+   * The same amounts after order edits: an item removed on the phone leaves `totalPriceSet` as it
+   * was placed, but not these. Absent from older payloads (an export, a stored raw order).
+   */
+  currentSubtotalPriceSet?: MoneySet | null;
+  currentTotalDiscountsSet?: MoneySet | null;
+  currentShippingPriceSet?: MoneySet | null;
+  currentTotalTaxSet?: MoneySet | null;
+  currentTotalPriceSet?: MoneySet | null;
   /** Shopify's Order.returnStatus (NO_RETURN, RETURN_REQUESTED, IN_PROGRESS, RETURNED, …). */
   returnStatus?: string | null;
   totalRefundedSet?: MoneySet | null;
@@ -237,11 +246,16 @@ const joinName = (...parts: Array<string | null | undefined>): string | null => 
  *   courier and the confirmation desk will call.
  * - `channel` is `pr` only when staff tagged the order `PR`. A 100%-discounted order is left
  *   `online` for a person to classify (CLAUDE.md: never assumed to be PR).
- * - A line's quantity is its current quantity, so items removed by an order edit count as 0.
+ * - A line's quantity is its current quantity, so items removed by an order edit count as 0. The
+ *   order's amounts are its current ones for the same reason: an edited order's total is what the
+ *   customer now owes (and what PostEx collects), not what was first placed. A cancelled order
+ *   keeps its placed amounts, since cancelling sets the current ones to zero.
  */
 export const mapOrder = (node: ShopifyOrderNode, lineNodes: ShopifyLineNode[] = node.lineItems.nodes): MappedOrder => {
   const shipping = node.shippingAddress;
   const tags = node.tags.map((t) => t.trim()).filter(Boolean);
+  // A cancellation empties Shopify's current amounts: a cancelled order keeps what it was placed for.
+  const current = (now: MoneySet | null | undefined, placed: MoneySet | null): MoneySet | null => (node.cancelledAt ? placed : (now ?? placed));
   return {
     customer: {
       shopifyCustomerId: node.customer ? parseGid(node.customer.id, 'Customer') : null,
@@ -265,11 +279,11 @@ export const mapOrder = (node: ShopifyOrderNode, lineNodes: ShopifyLineNode[] = 
       updatedAt: new Date(node.updatedAt),
       financialStatus: node.displayFinancialStatus?.toLowerCase() ?? null,
       fulfillmentStatus: node.displayFulfillmentStatus?.toLowerCase() ?? null,
-      subtotal: money(node.subtotalPriceSet, 'subtotal'),
-      discount: money(node.totalDiscountsSet, 'discount'),
-      shipping: money(node.totalShippingPriceSet, 'shipping'),
-      tax: money(node.totalTaxSet, 'tax'),
-      total: money(node.totalPriceSet, 'total'),
+      subtotal: money(current(node.currentSubtotalPriceSet, node.subtotalPriceSet), 'subtotal'),
+      discount: money(current(node.currentTotalDiscountsSet, node.totalDiscountsSet), 'discount'),
+      shipping: money(current(node.currentShippingPriceSet, node.totalShippingPriceSet), 'shipping'),
+      tax: money(current(node.currentTotalTaxSet, node.totalTaxSet), 'tax'),
+      total: money(current(node.currentTotalPriceSet, node.totalPriceSet) ?? node.totalPriceSet, 'total'),
       channel: tags.some((t) => t.toUpperCase() === 'PR') ? 'pr' : 'online',
       cancelledAt: node.cancelledAt ? new Date(node.cancelledAt) : null,
       cancelReason: node.cancelReason?.toLowerCase() ?? null,

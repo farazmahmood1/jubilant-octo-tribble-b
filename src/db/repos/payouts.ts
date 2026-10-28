@@ -7,12 +7,15 @@ import { type Db, atomically } from './upsert.js';
  * the journal posts from them later (Step 10).
  */
 
-/** Delivered parcels of one account with no payout line yet, oldest delivery first. */
+/**
+ * Parcels of one account that PostEx settles and that have no payout line yet: delivered ones
+ * (their COD paid out) and returned ones (their return charge taken off a payout), oldest first.
+ */
 export const awaitingPayout = async (db: Db, postexAccountId: string, limit: number): Promise<Array<{ id: string; trackingNumber: string }>> => {
   const rows = await db<{ id: string; tracking_number: string }[]>`
     select s.id, s.tracking_number from shipments s
     where s.postex_account_id = ${postexAccountId}
-      and coalesce(s.stage = 'delivered', s.status_code = '0005')
+      and coalesce(s.stage in ('delivered', 'returned'), s.status_code in ('0005', '0006'))
       and not exists (select 1 from payout_lines l where l.shipment_id = s.id)
     order by s.delivered_at nulls last, s.id
     limit ${limit}
@@ -21,10 +24,12 @@ export const awaitingPayout = async (db: Db, postexAccountId: string, limit: num
 };
 
 /**
- * Records that a parcel was paid out under a CPR: the payout row (one per account and CPR), and
- * the parcel's line, worth its COD less the forward charge and its tax, which PostEx deducts
- * before paying. The payout's amount is then re-summed from its lines, never added to.
- * Returns whether a line was written; a parcel already on a payout writes nothing.
+ * Records that a parcel was settled under a CPR: the payout row (one per account and CPR), and
+ * the parcel's line. A delivered parcel's line is its COD less its charges with their tax, which
+ * PostEx deducts before paying; a returned parcel collected nothing, so its line is minus its
+ * return charge and tax, taken off that payout. The payout's amount is then re-summed from its
+ * lines, never added to. Returns whether a line was written; a parcel already on a payout writes
+ * nothing.
  */
 export const recordPayout = async (db: Db, postexAccountId: string, shipmentId: string, payout: Payout & { cprNumber: string }): Promise<boolean> =>
   atomically(db, async (tx) => {
@@ -38,8 +43,8 @@ export const recordPayout = async (db: Db, postexAccountId: string, shipmentId: 
     const lines = await tx`
       insert into payout_lines (cod_payout_id, shipment_id, amount_paisa)
       select ${cod.id}, s.id,
-             coalesce(s.cod_amount_paisa, 0)
-             - coalesce((select sum(c.amount_paisa) from shipment_charges c where c.shipment_id = s.id and c.kind in ('forward', 'forward_tax')), 0)
+             case when coalesce(s.stage = 'delivered', s.status_code = '0005') then coalesce(s.cod_amount_paisa, 0) else 0 end
+             - coalesce((select sum(c.amount_paisa) from shipment_charges c where c.shipment_id = s.id and c.kind in ('forward', 'forward_tax', 'reversal', 'reversal_tax')), 0)
       from shipments s
       where s.id = ${shipmentId} and not exists (select 1 from payout_lines l where l.shipment_id = s.id)
       on conflict do nothing

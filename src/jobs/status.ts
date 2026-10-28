@@ -27,6 +27,8 @@ export interface SyncStatus {
   postex: { lastSyncedAt: Date | null; stale: boolean };
   /** The last Shopify webhook received: null means Shopify is not sending any (none registered). */
   lastWebhookAt: Date | null;
+  /** When the last webhook's change was stored: an open screen re-reads once this moves. */
+  lastWebhookProcessedAt: Date | null;
   jobs: JobFreshness[];
 }
 
@@ -48,7 +50,12 @@ export const syncStatus = async (sql: Sql, now: Date = new Date()): Promise<Sync
     where started_at > ${new Date(now.getTime() - 7 * 86_400_000)}
     group by job
   `;
-  const [webhook] = await sql<{ at: Date | null }[]>`select max(received_at) as at from webhook_events`;
+  // The newest events by id, through the primary key: read every few seconds by every open
+  // screen, so it must not scan a table that stock webhooks keep growing.
+  const [webhook] = await sql<{ at: Date | null; processed: Date | null }[]>`
+    select max(received_at) as at, max(processed_at) as processed
+    from (select received_at, processed_at from webhook_events order by id desc limit 50) latest
+  `;
   const freshness: JobFreshness[] = jobs.map((job) => {
     const row = rows.find((r) => r.job === job.name);
     return {
@@ -67,7 +74,7 @@ export const syncStatus = async (sql: Sql, now: Date = new Date()): Promise<Sync
     const every = Math.min(...own.map((j) => j.everyMs));
     return { lastSyncedAt: last, stale: !last || now.getTime() - last.getTime() > every * STALE_INTERVALS };
   };
-  return { now, shopify: source(SHOPIFY_JOBS), postex: source(POSTEX_JOBS), lastWebhookAt: webhook?.at ?? null, jobs: freshness };
+  return { now, shopify: source(SHOPIFY_JOBS), postex: source(POSTEX_JOBS), lastWebhookAt: webhook?.at ?? null, lastWebhookProcessedAt: webhook?.processed ?? null, jobs: freshness };
 };
 
 /** The Shopify and PostEx syncs a person may ask for at once: everything but the daily and hourly housekeeping. */

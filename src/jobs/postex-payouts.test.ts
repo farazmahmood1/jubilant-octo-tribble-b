@@ -102,6 +102,6 @@ describe('postex:payouts', { skip: skipWithoutDb }, () => {
   });
 
   it('is registered as a daily job', () => {
-    assert.deepEqual(jobs.find((j) => j.name === PAYOUTS_JOB)?.schedule, { everyMs: 24 * 60 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT });
+    assert.deepEqual(jobs.find((j) => j.name === PAYOUTS_JOB)?.schedule, { everyMs: 30 * 60 * 1000, alignToClock: true, quiet: OVERNIGHT });
   });
 });

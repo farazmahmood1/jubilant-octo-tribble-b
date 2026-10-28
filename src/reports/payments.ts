@@ -42,6 +42,12 @@ export interface PaymentsReport {
   /** The newest payment up to `until`, in or before the window: PostEx pays in batches days apart, so an empty day can say when the last one was. */
   lastPaidAt: Date | null;
   rows: PaymentRow[];
+  /**
+   * What PostEx still owes as of `until`, whatever the window: the COD receivable in the books,
+   * so delivered parcels not paid out yet, less the charges (return charges included) PostEx will
+   * take from them. `parcels` counts the parcels with a balance.
+   */
+  owed: { amount: Paisa; parcels: number };
   totals: { orders: number; parcels: number; payment: Paisa; cod: Paisa; deliveryFee: Paisa; deliveryTax: Paisa; revenue: Paisa; goods: Paisa; profit: Paisa };
 }
 
@@ -71,7 +77,8 @@ const query = (db: Db, since: Date, until: Date, store: string | undefined) =>
       group by l.shipment_id
     )
     select s.id::text as shipment_id, s.tracking_number, s.order_id::text, o.order_number, st.key as store, paid.paid_at, paid.cprs,
-           paid.payment::text, coalesce(s.cod_amount_paisa, 0)::text as cod,
+           -- A returned parcel collected nothing: its line is the return charge taken off the payout.
+           paid.payment::text, (case when coalesce(s.stage = 'delivered', s.status_code = '0005') then coalesce(s.cod_amount_paisa, 0) else 0 end)::text as cod,
            coalesce((select sum(c.amount_paisa) from shipment_charges c where c.shipment_id = s.id and c.kind in ('forward', 'reversal')), 0)::text as fee,
            coalesce((select sum(c.amount_paisa) from shipment_charges c where c.shipment_id = s.id and c.kind in ('forward_tax', 'reversal_tax')), 0)::text as tax,
            coalesce(b.revenue, 0)::text as revenue, coalesce(b.goods, 0)::text as goods, coalesce(b.charges, 0)::text as charges, coalesce(b.other, 0)::text as other
@@ -124,12 +131,23 @@ export const paymentsReport = async (db: Db, options: { window: PaymentWindow; s
   const [last] = await db<{ at: Date | null }[]>`
     select max(p.paid_at) as at from cod_payouts p where p.paid_at <= ${until} ${ofStore(db, options.store)}
   `;
+  const ofStoreLine = options.store ? db`and l.store_id in (select id from stores where key = ${options.store})` : db``;
+  const [owed] = await db<{ amount: string | null; parcels: string }[]>`
+    select sum(balance)::text as amount, count(*) filter (where balance <> 0)::text as parcels
+    from (
+      select sum(l.debit_paisa - l.credit_paisa) as balance
+      from ledger_lines l
+      where l.account_code = '1100' and l.entry_date <= ${until} ${ofStoreLine}
+      group by l.shipment_id
+    ) b
+  `;
   return {
     window: options.window,
     since,
     until,
     lastPaidAt: last?.at ?? null,
     rows,
+    owed: { amount: readPaisa(owed?.amount ?? '0'), parcels: Number(owed?.parcels ?? 0) },
     totals: {
       orders: rows.length,
       parcels: rows.reduce((n, r) => n + r.trackingNumbers.length, 0),

@@ -5,11 +5,15 @@ import type { Sql } from '../db.js';
 import { openReviewItem } from '../db/repos/review.js';
 import { redactCustomer, redactShop } from '../gdpr/redact.js';
 import { shopifyClient } from '../integrations/shopify/client.js';
-import { type StoreTarget, emptyCounts, resyncOrder } from '../jobs/shopify.js';
+import { type StoreTarget, emptyCounts, markProductDeleted, productOfInventoryItem, resyncOrder, resyncProduct } from '../jobs/shopify.js';
 import { maskPii } from '../lib/pii.js';
 import type { Logger } from '../logger.js';
 
-/** The topics the app subscribes to. The last three are Shopify's mandatory GDPR webhooks. */
+/**
+ * The topics the app subscribes to: orders, then the catalogue (a product, its stock and its cost
+ * per item, so none of them waits for the full scan). The last three are Shopify's mandatory GDPR
+ * webhooks.
+ */
 export const WEBHOOK_TOPICS = [
   'orders/create',
   'orders/updated',
@@ -17,6 +21,11 @@ export const WEBHOOK_TOPICS = [
   'fulfillments/create',
   'fulfillments/update',
   'refunds/create',
+  'products/create',
+  'products/update',
+  'products/delete',
+  'inventory_levels/update',
+  'inventory_items/update',
   'customers/data_request',
   'customers/redact',
   'shop/redact',
@@ -71,11 +80,17 @@ const orderGid = (payload: Record<string, unknown>, field: 'id' | 'order_id'): s
   return typeof id === 'number' || typeof id === 'string' ? `gid://shopify/Order/${id}` : null;
 };
 
+const gidOf = (payload: Record<string, unknown>, field: string, type: string): string | null => {
+  const id = payload[field];
+  return typeof id === 'number' || typeof id === 'string' ? `gid://shopify/${type}/${id}` : null;
+};
+
 const stringIds = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
 
 /**
  * Acts on one stored webhook event and marks it processed. Order, fulfillment and refund events
- * re-fetch the order through GraphQL and store it the same way the sync does. GDPR events redact
+ * re-fetch the order through GraphQL and store it the same way the sync does; product, stock and
+ * cost events re-fetch the product the same way the catalogue scan does. GDPR events redact
  * or queue a data request for a person. Throws on failure, leaving the event unprocessed for the
  * catch-up job to retry.
  */
@@ -92,6 +107,15 @@ export const processWebhookEvent = async (deps: Pick<WebhookDeps, 'sql' | 'logge
       const found = await resyncOrder(deps, store, gid, counts);
       log.info({ found, skipped: counts.skipped }, 'Webhook processed');
     }
+  } else if (topic.startsWith('products/')) {
+    const gid = gidOf(payload, 'id', 'Product');
+    if (gid && topic === 'products/delete') await markProductDeleted(deps.sql, store, gid);
+    else if (gid) log.info({ found: await resyncProduct(deps, store, gid) }, 'Webhook processed');
+  } else if (topic === 'inventory_levels/update' || topic === 'inventory_items/update') {
+    // A stock level names its item as inventory_item_id; an item (its cost) is the payload itself.
+    const item = payload[topic === 'inventory_levels/update' ? 'inventory_item_id' : 'id'];
+    const product = typeof item === 'number' || typeof item === 'string' ? await productOfInventoryItem(store, String(item)) : null;
+    if (product) log.info({ found: await resyncProduct(deps, store, product) }, 'Webhook processed');
   } else if (topic === 'customers/redact') {
     const customer = (payload['customer'] ?? {}) as Record<string, unknown>;
     const result = await redactCustomer(deps.sql, store.id, {

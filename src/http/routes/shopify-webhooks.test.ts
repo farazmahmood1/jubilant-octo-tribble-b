@@ -199,7 +199,7 @@ describe('POST /webhooks/shopify/:topic through the app', { skip: skipWithoutDb 
 
   it('acknowledges a topic we do not handle, without storing it', async () => {
     const before = (await events()).length;
-    const result = await deliver('products/update', JSON.stringify({ id: 1 }));
+    const result = await deliver('collections/update', JSON.stringify({ id: 1 }));
     assert.deepEqual([result.status, result.json], [200, { ignored: true }]);
     assert.equal((await events()).length, before);
   });

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
-import { type ConfirmationTags, DEFAULT_CONFIRMATION_TAGS } from '../../db/repos/order-state.js';
+import { type ConfirmationTags, DEFAULT_CONFIRMATION_TAGS, recomputeOrderState, tagWords } from '../../db/repos/order-state.js';
 import { atomically } from '../../db/repos/upsert.js';
 import { DEFAULT_WINDOW_DAYS } from '../../domain/matching.js';
 import { DEFAULT_CONFIRMED_LOOKBACK_DAYS, DEFAULT_CONFIRMED_NOT_BOOKED_HOURS, DEFAULT_STUCK_DAYS } from '../../jobs/reconciliation.js';
@@ -128,7 +128,11 @@ export const settingsRouter = (getSql: SqlProvider): Router => {
     res.json({ alerts: value });
   });
 
-  /** Which Shopify tags mean which confirmation outcome (S7). Run `npm run orders:states` after a change. */
+  /**
+   * Which Shopify tags mean which confirmation outcome (S7). Saving re-reads, there and then, the
+   * orders carrying a tag whose meaning changed (added, removed or moved to another outcome), so
+   * nobody has to run `npm run orders:states`; an unchanged tag cannot move an order.
+   */
   router.get('/settings/confirmation-tags', async (_req, res) => {
     const sql = requireSql(getSql);
     const [row] = await sql<{ value: Partial<ConfirmationTags> }[]>`select value from app_settings where key = 'confirmation_tags'`;
@@ -139,7 +143,7 @@ export const settingsRouter = (getSql: SqlProvider): Router => {
     const sql = requireSql(getSql);
     const value = parse(confirmationTags, req.body);
     const actor = await actorId(sql, sessionUser(req));
-    await atomically(sql, async (tx) => {
+    const previous = await atomically(sql, async (tx) => {
       const [before] = await tx<{ value: unknown }[]>`select value from app_settings where key = 'confirmation_tags' for update`;
       await tx`
         insert into app_settings (key, value) values ('confirmation_tags', ${tx.json(value)})
@@ -149,8 +153,28 @@ export const settingsRouter = (getSql: SqlProvider): Router => {
         insert into audit_log (actor_id, action, entity, entity_id, before, after)
         values (${actor}, 'settings.update', 'app_settings', 'confirmation_tags', ${before ? tx.json(before.value as never) : null}, ${tx.json(value)})
       `;
+      return { ...DEFAULT_CONFIRMATION_TAGS, ...((before?.value as Partial<ConfirmationTags> | undefined) ?? {}) };
     });
-    res.json({ confirmationTags: value });
+    // Each tag's words with the outcomes they mean, before and after: a tag whose outcomes differ
+    // is one that can move an order.
+    const meanings = (tags: ConfirmationTags) => {
+      const out = new Map<string, string[]>();
+      for (const [outcome, list] of Object.entries(tags) as Array<[string, string[]]>) for (const tag of list) out.set(tagWords(tag), [...(out.get(tagWords(tag)) ?? []), outcome].sort());
+      return out;
+    };
+    const was = meanings(previous);
+    const now = meanings(value);
+    const moved = [...new Set([...was.keys(), ...now.keys()])].filter((w) => w !== '' && (was.get(w) ?? []).join() !== (now.get(w) ?? []).join());
+    const orders = moved.length
+      ? await sql<{ id: string }[]>`
+          select o.id from orders o
+          where exists (select 1 from unnest(o.tags) t where trim(regexp_replace(lower(t), '[^[:alnum:]]+', ' ', 'g')) = any(${moved}::text[]))
+          order by o.id
+        `
+      : [];
+    let changed = 0;
+    for (const { id } of orders) if ((await recomputeOrderState(sql, id)).changed) changed++;
+    res.json({ confirmationTags: value, reread: orders.length, changed });
   });
 
   return router;
