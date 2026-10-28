@@ -11,16 +11,16 @@ import { type Db, atomically } from './upsert.js';
  * Parcels of one account that PostEx settles and that have no payout line yet: delivered ones
  * (their COD paid out) and returned ones (their return charge taken off a payout), oldest first.
  */
-export const awaitingPayout = async (db: Db, postexAccountId: string, limit: number): Promise<Array<{ id: string; trackingNumber: string }>> => {
-  const rows = await db<{ id: string; tracking_number: string }[]>`
-    select s.id, s.tracking_number from shipments s
+export const awaitingPayout = async (db: Db, postexAccountId: string, limit: number): Promise<Array<{ id: string; trackingNumber: string; deliveredAt: Date | null }>> => {
+  const rows = await db<{ id: string; tracking_number: string; delivered_at: Date | null }[]>`
+    select s.id, s.tracking_number, s.delivered_at from shipments s
     where s.postex_account_id = ${postexAccountId}
       and coalesce(s.stage in ('delivered', 'returned'), s.status_code in ('0005', '0006'))
       and not exists (select 1 from payout_lines l where l.shipment_id = s.id)
     order by s.delivered_at nulls last, s.id
     limit ${limit}
   `;
-  return rows.map((r) => ({ id: r.id, trackingNumber: r.tracking_number }));
+  return rows.map((r) => ({ id: r.id, trackingNumber: r.tracking_number, deliveredAt: r.delivered_at }));
 };
 
 /**

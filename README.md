@@ -145,7 +145,7 @@ History steps are inserted with the unique `(shipment, code, time)` key doing th
 re-run adds no rows. A parcel's status, attempts and last failure reason are derived from all its
 stored steps, in event-time order. An unknown status code is reported once to the review queue.
 
-`npm run job -- postex:payouts` (every 30 minutes) asks PostEx's payment status for delivered and returned parcels not
+`npm run job -- postex:payouts` (every 2 minutes a quick check of the 3 oldest unpaid parcels per account, the rest only when one is paid; a full pass every 30 minutes) asks PostEx's payment status for delivered and returned parcels not
 yet on a payout, oldest first, up to 600 per account per run. A settled parcel is recorded under
 its CPR in `cod_payouts`, with a `payout_lines` row worth its COD less its charges and their
 tax (a returned parcel collected nothing: its line is minus its return charge, which PostEx takes off the payout); the payout's amount is the sum of its lines.
@@ -560,7 +560,7 @@ so any mix of them never runs a job twice side by side:
 
 Every Shopify and PostEx job runs every 2 minutes, around the clock (`SYNC_EVERY_MS` in
 `src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `postex:sync`,
-`reconciliation:scan` and `pr:detect`. `postex:payouts` runs every 30 minutes. Neon therefore never gets to
+`reconciliation:scan` and `pr:detect`. `postex:payouts` runs every 2 minutes too (a quick check; a full pass every 30 minutes). Neon therefore never gets to
 suspend its compute while the worker runs; that is the cost of the freshness (risk R3).
 
 `npm run dev` starts the worker with the API; in production the worker is its own Render service
