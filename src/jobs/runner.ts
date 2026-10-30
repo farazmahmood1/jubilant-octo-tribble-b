@@ -109,6 +109,14 @@ const MAX_ERROR_LENGTH = 2_000;
  */
 const LOCK_NAMESPACE = 'nur.jobs';
 
+/**
+ * A run still `running` after this long is taken for dead. A serverless function that is frozen
+ * or killed mid-run can leave its reserved connection open on the server, holding the job lock
+ * with no process behind it; every later trigger would be skipped until the server drops it.
+ * Normal runs take minutes and a function is stopped long before this.
+ */
+const STALE_RUN_MS = 45 * 60 * 1000;
+
 const errorText = (error: unknown): string => {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return text.length > MAX_ERROR_LENGTH ? `${text.slice(0, MAX_ERROR_LENGTH)}…` : text;
@@ -259,6 +267,13 @@ export class JobRunner {
         select pg_try_advisory_lock(hashtext(${LOCK_NAMESPACE}), hashtext(${`${job.name}:${accountRef}`})) as locked
       `;
       locked = lock?.locked === true;
+      if (!locked && (await this.freeStaleLock(job.name, accountRef))) {
+        const [retry] = await connection<{ locked: boolean }[]>`
+          select pg_try_advisory_lock(hashtext(${LOCK_NAMESPACE}), hashtext(${`${job.name}:${accountRef}`})) as locked
+        `;
+        locked = retry?.locked === true;
+        if (locked) log.warn('Freed a job lock left by a run that stopped responding');
+      }
       if (!locked) {
         log.debug('Running in another process; skipping');
         return result('skipped');
@@ -322,6 +337,35 @@ export class JobRunner {
       }
       this.running.delete(job.name);
     }
+  }
+
+  /**
+   * When the job's lock is held but its run has been `running` for longer than STALE_RUN_MS,
+   * closes the idle sessions holding that lock (a live run's lock session is idle too, which is
+   * why the age of the run decides). Returns whether any session was closed.
+   */
+  private async freeStaleLock(name: string, accountRef: string): Promise<boolean> {
+    const [stale] = await this.sql<{ id: string }[]>`
+      select id from sync_runs
+      where job = ${name} and account_ref = ${accountRef} and status = 'running'
+        and started_at < now() - make_interval(secs => ${STALE_RUN_MS / 1000})
+      limit 1
+    `;
+    if (!stale) return false;
+    const closed = await this.lockSql<{ closed: boolean }[]>`
+      select pg_terminate_backend(l.pid) as closed
+      from pg_locks l join pg_stat_activity a on a.pid = l.pid
+      where l.locktype = 'advisory' and l.granted and l.objsubid = 2
+        and l.classid = (hashtext(${LOCK_NAMESPACE})::bigint & 4294967295)::oid
+        and l.objid = (hashtext(${`${name}:${accountRef}`})::bigint & 4294967295)::oid
+        and a.state = 'idle' and l.pid <> pg_backend_pid()
+    `;
+    if (closed.some((r) => r.closed)) {
+      // Give the server a moment to drop the session and its lock.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return true;
+    }
+    return false;
   }
 }
 

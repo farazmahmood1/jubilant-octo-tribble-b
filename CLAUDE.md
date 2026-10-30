@@ -2,7 +2,7 @@
 
 NUR Organics is the parent of two Shopify D2C brands in Pakistan: NUR by Juggun and
 Juggun's Organics. Orders are confirmed by WhatsApp/phone, shipped cash-on-delivery via
-PostEx, and also supplied to retail partners on consignment. We are building one platform
+PostEx, and also supplied to retail partners on consignment. We are building Monixys, one platform
 that joins Shopify orders, PostEx parcel outcomes, stock and accounting, so profit and
 inventory are finally correct.
 

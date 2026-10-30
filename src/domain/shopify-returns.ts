@@ -428,7 +428,7 @@ export const syncCheckInToShopify = async (
     const appliedBefore = await appliedForOrder(tx, orderId);
     const applied: Applied[] = [];
     let products: WritebackProduct[] = [];
-    const reference = `logistics://nur-platform/order/${orderId}/returns`;
+    const reference = `logistics://monixys/order/${orderId}/returns`;
 
     try {
       const order = await gateway.order(store, shopifyOrderId);
@@ -558,7 +558,7 @@ export const cancelShopifyOrderForReturn = async (
     try {
       await gateway.cancel(store, shopifyOrderId, {
         restock,
-        staffNote: `Returned by PostEx (${facts.tracking_number}); cancelled from the NUR platform after check-in${restock ? ', items restocked' : ', damaged: not restocked'}.`,
+        staffNote: `Returned by PostEx (${facts.tracking_number}); cancelled from Monixys after check-in${restock ? ', items restocked' : ', damaged: not restocked'}.`,
       });
       // Cancelling with restock freed every committed unit; the damaged ones among them are not stock.
       if (restock) {
@@ -569,7 +569,7 @@ export const cancelShopifyOrderForReturn = async (
           const location = o.locationGid ?? order.locationGid;
           if (freed === 0 || !item || !location) continue;
           const key = idempotencyKey(`damaged:${orderId}:${o.variant}:${freed}`);
-          await gateway.adjust(store, { reason: 'damaged', key, reference: `logistics://nur-platform/order/${orderId}/returns`, changes: [{ inventoryItemGid: item, locationGid: location, delta: -freed }] });
+          await gateway.adjust(store, { reason: 'damaged', key, reference: `logistics://monixys/order/${orderId}/returns`, changes: [{ inventoryItemGid: item, locationGid: location, delta: -freed }] });
           applied.push({ variant: o.variant, delta: -freed, reason: 'damaged', key });
         }
       }

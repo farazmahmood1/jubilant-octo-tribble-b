@@ -1,5 +1,5 @@
 {
-  "name": "nur-platform-backend",
+  "name": "monixys-backend",
   "version": "0.1.0",
   "private": true,
   "description": "Order, returns, inventory and profit platform for NUR Organics — Shopify + PostEx backend",

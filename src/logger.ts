@@ -26,7 +26,7 @@ const redact = {
 export const logger = pino({
   level: config.logLevel,
   redact,
-  base: { service: 'nur-platform-backend' },
+  base: { service: 'monixys-backend' },
   ...(config.isProduction || process.env.VERCEL
     ? {}
     : { transport: { target: 'pino-pretty', options: { colorize: true, translateTime: 'HH:MM:ss', ignore: 'pid,hostname,service' } } }),

@@ -1,4 +1,4 @@
-# NUR Organics platform — backend
+# Monixys — backend
 
 Node.js + Express + TypeScript service behind the order, returns, inventory and profit platform.
 It connects two Shopify stores (NUR by Juggun, Juggun's Organics) and the PostEx COD accounts,

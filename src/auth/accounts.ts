@@ -26,7 +26,7 @@ export class AccountError extends Error {
 /** Five wrong passwords or codes lock an account for fifteen minutes. */
 export const MAX_FAILED_LOGINS = 5;
 export const LOCK_MINUTES = 15;
-export const ISSUER = 'NUR Organics';
+export const ISSUER = 'Monixys';
 
 const requiresTotp = (role: Role): boolean => ROLES_REQUIRING_TOTP.includes(role);
 
