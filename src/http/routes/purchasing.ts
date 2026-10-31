@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
 import { atomically } from '../../db/repos/upsert.js';
+import { afterChange } from '../../domain/settle.js';
 import { type Paisa, paisa } from '../../lib/money.js';
 import { endOfKarachiDay, formatKarachi } from '../../lib/time.js';
 import {
@@ -214,14 +215,16 @@ export const purchasingRouter = (getSql: SqlProvider): Router => {
   router.post('/purchasing/orders/:id/receipts', async (req, res) => {
     const { id: poId } = parse(idParams, req.params);
     const body = parse(receipt, req.body);
-    const result = await receiveGoods(requireSql(getSql), {
+    const sql = requireSql(getSql);
+    const result = await receiveGoods(sql, {
       poId,
       receivedAt: body.receivedAt ? new Date(body.receivedAt) : new Date(),
       lines: body.lines,
       note: body.note,
       actorId: await actor(req),
     }).catch(asHttp);
-    res.status(201).json(json(result));
+    // Received units reach Shopify's stock, and a new cost reaches the parcels waiting on one.
+    res.status(201).json({ ...(json(result) as object), ...(await afterChange(sql, 'goods receipt')) });
   });
 
   /** The vendor's bill, refused unless it matches the order and what was received. */

@@ -16,6 +16,25 @@ export const ORDER_CHANNELS = ['online', 'consignment', 'pr'] as const satisfies
 export const ORDER_FLAGS = ['no_parcel', 'many_parcels', 'discounted'] as const;
 export type OrderFlag = (typeof ORDER_FLAGS)[number];
 export const ORDER_SORTS = ['placedAt', 'total', 'items'] as const;
+export type PaymentMethod = 'cod' | 'card' | 'card_and_cod' | 'other';
+
+const COD_GATEWAY = /cash on delivery|\bcod\b/i;
+// Paid ahead, but not by card: staff marked it paid, or it came by bank or gift card.
+const OTHER_GATEWAY = /^manual$|bank|deposit|transfer|money order|gift.?card/i;
+
+/**
+ * How the customer paid, from Shopify's gateway names. A card order's parcel collects nothing,
+ * which is right and only looks like missing money without this. Null when Shopify gave no
+ * gateway (a free order) or the order has not been read since the column was added.
+ */
+export const paymentMethod = (gateways: readonly string[] | null): PaymentMethod | null => {
+  if (!gateways || gateways.length === 0) return null;
+  const cod = gateways.some((g) => COD_GATEWAY.test(g));
+  const card = gateways.some((g) => !COD_GATEWAY.test(g) && !OTHER_GATEWAY.test(g));
+  if (cod && card) return 'card_and_cod';
+  if (cod) return 'cod';
+  return card ? 'card' : 'other';
+};
 
 export interface OrderFilter {
   search?: string;
@@ -45,6 +64,9 @@ export interface OrderListRow {
   totalPaisa: string;
   state: OrderState | null;
   financialStatus: string | null;
+  paymentMethod: PaymentMethod | null;
+  /** Shopify's gateway names as it spells them, for what `paymentMethod` cannot name. */
+  paymentGateways: string[];
   channel: OrderChannel;
   items: number;
   discountCodes: string[];
@@ -89,11 +111,11 @@ export const listOrders = async (db: Db, f: OrderFilter): Promise<{ rows: OrderL
   const sort = f.sort ?? { key: 'placedAt', dir: 'desc' };
   const rows = await db<{
     id: string; order_number: string; store: 'nur' | 'organics' | null; placed_at: Date; customer_name: string | null; phone: string | null; city: string | null;
-    total: string; state: OrderState | null; financial_status: string | null; channel: OrderChannel; items: number; discount_codes: string[]; tags: string[]; parcels: number;
+    total: string; state: OrderState | null; financial_status: string | null; payment_gateways: string[] | null; channel: OrderChannel; items: number; discount_codes: string[]; tags: string[]; parcels: number;
     parcel_id: string | null; tracking_number: string | null; parcel_stage: Stage | null;
   }[]>`
     select o.id, o.order_number, st.key as store, o.placed_at, c.name as customer_name, c.phone_e164 as phone, ad.city,
-           o.total_paisa::text as total, o.state, o.financial_status, o.channel, o.discount_codes, o.tags,
+           o.total_paisa::text as total, o.state, o.financial_status, o.payment_gateways, o.channel, o.discount_codes, o.tags,
            (select coalesce(sum(l.qty), 0)::int from order_lines l where l.order_id = o.id) as items,
            (select count(*)::int from shipments s where s.order_id = o.id) as parcels,
            p.id as parcel_id, p.tracking_number, p.stage as parcel_stage
@@ -130,6 +152,8 @@ export const listOrders = async (db: Db, f: OrderFilter): Promise<{ rows: OrderL
       totalPaisa: r.total,
       state: r.state,
       financialStatus: r.financial_status,
+      paymentMethod: paymentMethod(r.payment_gateways),
+      paymentGateways: r.payment_gateways ?? [],
       channel: r.channel,
       items: r.items,
       discountCodes: r.discount_codes,

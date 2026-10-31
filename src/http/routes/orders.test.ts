@@ -88,6 +88,19 @@ describe('API: orders', { skip: skipWithoutDb }, () => {
     assert.equal(cities.length, 2);
   });
 
+  it('says how each order was paid, and unknown when Shopify has not said', async () => {
+    await s.schema.sql`update orders set payment_gateways = '{"Cash on Delivery (COD)"}' where id = ${id['delivered']!}`;
+    await s.schema.sql`update orders set payment_gateways = '{shopify_payments}' where id = ${id['plain']!}`;
+    const all = (await rows('')).rows;
+    const paid = (key: string) => {
+      const r = all.find((x) => x['id'] === id[key])!;
+      return [r['paymentMethod'], r['paymentGateways']];
+    };
+    assert.deepEqual(paid('delivered'), ['cod', ['Cash on Delivery (COD)']]);
+    assert.deepEqual(paid('plain'), ['card', ['shopify_payments']]);
+    assert.deepEqual(paid('organics'), [null, []]);
+  });
+
   it('shows each order its Shopify tags and filters by them, any case', async () => {
     const plain = (await rows('')).rows.find((r) => r['id'] === id['plain'])!;
     assert.deepEqual(plain['tags'], ['✅ Order Confirmed', 'PostEx']);

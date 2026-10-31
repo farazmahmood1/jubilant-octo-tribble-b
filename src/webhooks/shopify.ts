@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config, isShopifyStoreReady } from '../config.js';
 import type { Sql } from '../db.js';
 import { openReviewItem } from '../db/repos/review.js';
+import { settlePendingShipments } from '../domain/settle.js';
 import { redactCustomer, redactShop } from '../gdpr/redact.js';
 import { shopifyClient } from '../integrations/shopify/client.js';
 import { type StoreTarget, emptyCounts, markProductDeleted, productOfInventoryItem, resyncOrder, resyncProduct } from '../jobs/shopify.js';
@@ -142,6 +143,12 @@ export const processWebhookEvent = async (deps: Pick<WebhookDeps, 'sql' | 'logge
       values (null, 'gdpr.customers_data_request', 'store', ${store.id}, ${deps.sql.json({ webhookEventId: event.id } as never)})
     `;
     log.info('GDPR data request queued for review');
+  }
+
+  // What Shopify changed reaches the numbers now, not on the next PostEx sync: an edited order's
+  // sale, a new cost's COGS, the order's state. A failure here is left to that sync, not retried.
+  if (!topic.startsWith('customers/') && topic !== 'shop/redact') {
+    await settlePendingShipments(deps.sql).catch((err: unknown) => log.warn({ err }, 'Settling after the webhook failed; the next sync will'));
   }
 
   // GDPR payloads carry the customer's email and phone themselves; keep only what the audit needs.

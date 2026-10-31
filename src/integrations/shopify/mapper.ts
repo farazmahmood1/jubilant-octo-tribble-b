@@ -60,6 +60,8 @@ export interface ShopifyOrderNode {
   cancelReason: string | null;
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string | null;
+  /** "Cash on Delivery (COD)", a card gateway, or both. Absent from older payloads. */
+  paymentGatewayNames?: string[] | null;
   tags: string[];
   discountCodes: string[];
   subtotalPriceSet: MoneySet | null;
@@ -203,6 +205,8 @@ export interface MappedOrder {
     updatedAt: Date;
     financialStatus: string | null;
     fulfillmentStatus: string | null;
+    /** Null when the payload did not say, so a stored answer is not erased. */
+    paymentGateways: string[] | null;
     subtotal: Paisa;
     discount: Paisa;
     shipping: Paisa;
@@ -279,6 +283,7 @@ export const mapOrder = (node: ShopifyOrderNode, lineNodes: ShopifyLineNode[] = 
       updatedAt: new Date(node.updatedAt),
       financialStatus: node.displayFinancialStatus?.toLowerCase() ?? null,
       fulfillmentStatus: node.displayFulfillmentStatus?.toLowerCase() ?? null,
+      paymentGateways: node.paymentGatewayNames ? node.paymentGatewayNames.map((g) => g.trim()).filter(Boolean) : null,
       subtotal: money(current(node.currentSubtotalPriceSet, node.subtotalPriceSet), 'subtotal'),
       discount: money(current(node.currentTotalDiscountsSet, node.totalDiscountsSet), 'discount'),
       shipping: money(current(node.currentShippingPriceSet, node.totalShippingPriceSet), 'shipping'),

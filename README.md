@@ -169,6 +169,18 @@ its stage is `returning`. Counts and corrections go through `recordAdjustment()`
 adjustment location, and are audited. Order lines with no catalogue variant cannot move and are
 queued.
 
+**Stock changes made here reach Shopify at once** (`domain/shopify-stock.ts`, migration 0026):
+adjustments and counts (not opening stock), goods received, consignment transfers and PR sends
+handed over outside Shopify, when they move units into or out of the main warehouse, change
+Shopify's available stock by the same amount (out is negative), with Shopify's matching reason
+(`cycle_count_available`, `received`, `movement_created`, ...). Parcels and returns are not pushed:
+Shopify moves those itself through the order. Each move is pushed once (`shopify_stock_pushes`,
+Shopify's idempotency key per move, a per-move lock), right after the request that made it
+(`afterChange` in `domain/settle.ts`) and by `shopify:stock-push` for anything left. A product
+Shopify does not track stock for is skipped; a refusal is queued for review
+(`shopify_stock_push_failed`) and retried, at most hourly. Moves recorded before 0026 were marked
+skipped, so nothing old is replayed.
+
 **A parcel's stage** (`shipments.stage`, migration 0022) is derived from its whole history by the
 same replay as the order state (`parcelStage` in `domain/order-state.ts`) and written with
 `status_code` by `refreshDerived`. Never test `status_code` for an outcome: it is only the latest
@@ -180,12 +192,27 @@ existed (`fillMissingStages`).
 
 ## Returns and Shopify
 
-Restocking and cancelling are separate. **Checking a return in never cancels the Shopify order.**
-`syncCheckInToShopify` (`domain/shopify-returns.ts`) reads the order live from Shopify and, per
-product, over every parcel of the order:
+Every return button (Restock, Damaged, Split, Retry) settles the order in Shopify
+(`syncCheckInToShopify`, `domain/shopify-returns.ts`), from the order read live:
+
+- *Open, units still committed* (a refused COD parcel): **the order is cancelled**, with restock if
+  any unit came back fine; damaged units the cancel frees are taken off available. Never while
+  another parcel of the order is still out (a re-sent order), never refunding, never emailing.
+- *Fulfilled*: a Shopify return is recorded for the units that came back and not yet taken back
+  by a return or refund (reason "Other", with a note naming the parcel), each disposed of as
+  restocked (good) or not restocked (damaged), one reverse fulfillment order per call, and
+  closed. A return already open for them is used, not doubled.
+- The background re-check (`quiet`) never cancels or records a return; only a button does.
+
+Shopify is read again after every change, so each step does only what is still missing. Then,
+per product, over every parcel of the order:
 
     gone     = ordered - still committed - already restocked by Shopify
-    add now  = min(units checked in as restocked, gone) - units the platform already added
+    add now  = min(units checked in as restocked - already restocked by Shopify, gone)
+               - units the platform already added
+
+(A unit Shopify holds as gone may be a damaged one disposed of as not restocked, so only good units
+Shopify has not put back are added.)
 
 - *Still committed*: unfulfilled units of an order that is not cancelled. Shopify still counts them
   on hand, so adding them would count them twice once the order is cancelled with restock. The
@@ -202,10 +229,11 @@ pending and failed attempts every 10 minutes (`writebacksToRecheck`), so cancell
 Shopify settles the return by itself; an unchanged answer writes no attempt row (only
 `shopify_writeback_checks`, migration 0023).
 
-**Cancel in Shopify** is its own action (`cancelShopifyOrderForReturn`,
-`POST /api/v1/stock/returns/:shipmentId/shopify-cancel`): only after check-in, only for an order
-with units still committed, restocking only if some came back in good condition (damaged ones are
-then taken off available), never refunding or notifying, audited (`shopify.order_cancel`).
+**Cancel in Shopify** stays as its own confirmed button (`cancelShopifyOrderForReturn`,
+`POST /api/v1/stock/returns/:shipmentId/shopify-cancel`) for a return left waiting on its open
+order: only after check-in, only for an order with units still committed and no other parcel out,
+restocking only if some came back in good condition (damaged ones are then taken off available),
+never refunding or notifying. Every cancel, from either path, is audited (`shopify.order_cancel`).
 
 Shopify's own refunds and returns are synced with every order (`shopify_refunds`,
 `shopify_refund_lines`, `shopify_returns`, `orders.refunded_paisa` / `return_status`), keyed on
@@ -551,15 +579,21 @@ so any mix of them never runs a job twice side by side:
    `GET /api/v1/sync/status` says how fresh Shopify and PostEx are; "Sync now" sends `{ now: true }`.
 2. **A cron**, for when nobody has it open: `GET|POST /internal/cron` with
    `Authorization: Bearer <CRON_SECRET>`. Set `CRON_SECRET` in Vercel. Vercel Cron on Hobby only
-   runs daily, so either use Vercel Pro (`"crons": [{ "path": "/internal/cron", "schedule": "*/2 * * * *" }]`
-   in `vercel.json`, which sends the header itself) or a free external scheduler (cron-job.org,
-   every 2 minutes, with that header). `CRON_BUDGET_MS` (default 240 s) keeps a call under the
-   function limit; jobs stop at a batch boundary and resume from their cursors.
+   runs daily, so production (Hobby) uses cron-job.org: every minute, that header, and
+   `CRON_BUDGET_MS=25000` in Vercel so each call answers inside cron-job.org's 30 s timeout. Jobs
+   stop at a batch boundary and resume from their cursors on the next minute. (On Vercel Pro,
+   `"crons": [{ "path": "/internal/cron", "schedule": "* * * * *" }]` in `vercel.json` instead; it
+   sends the header itself.)
 3. **Shopify webhooks**, processed before the answer on Vercel (`inlineMs`), since work after it
    may never run. Registered with `npm run webhooks -- <backend URL> --apply` (rerun when the URL changes).
+   After an order or product event, the parcels it touched are settled at once
+   (`settlePendingShipments`): stock, the order's state and postings, not on the next PostEx sync.
+
+Every action in the platform that moves stock or money settles what it touched before answering
+(`afterChange`), so reports never wait on a job for a change made here.
 
 Every Shopify and PostEx job runs every 2 minutes, around the clock (`SYNC_EVERY_MS` in
-`src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `postex:sync`,
+`src/jobs/runner.ts`): `shopify:orders`, `shopify:catalogue`, `shopify:catchup`, `shopify:stock-push`, `postex:sync`,
 `reconciliation:scan` and `pr:detect`. `postex:payouts` runs every 2 minutes too (a quick check; a full pass every 30 minutes). Neon therefore never gets to
 suspend its compute while the worker runs; that is the cost of the freshness (risk R3).
 

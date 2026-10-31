@@ -26,6 +26,8 @@ export interface OrderInput {
   shippingAddressId: string | null;
   financialStatus: string | null;
   fulfillmentStatus: string | null;
+  /** Shopify's payment gateway names. Left out or null, the stored ones are kept (a CSV import knows none). */
+  paymentGateways?: string[] | null;
   subtotal: Paisa;
   discount: Paisa;
   shipping: Paisa;
@@ -133,6 +135,7 @@ const upsertHeader = async (db: Db, input: OrderInput): Promise<UpsertResult> =>
     postex_tracking_numbers: input.postexTrackingNumbers ?? [],
     source: input.source,
     raw: input.raw === undefined || input.raw === null ? null : db.json(input.raw as never),
+    ...(input.paymentGateways ? { payment_gateways: input.paymentGateways } : {}),
     ...(input.shopify ? { refunded_paisa: big(input.shopify.refunded), return_status: input.shopify.returnStatus } : {}),
   };
   // A Shopify order is identified by its Shopify id; a consignment sale, which has none, by its

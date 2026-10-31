@@ -115,7 +115,7 @@ const RETURN_FIELDS = `id name status createdAt closedAt returnLineItems(first: 
 
 const ORDER_FIELDS = `
   id name note createdAt updatedAt cancelledAt cancelReason
-  displayFinancialStatus displayFulfillmentStatus returnStatus
+  displayFinancialStatus displayFulfillmentStatus returnStatus paymentGatewayNames
   tags discountCodes
   subtotalPriceSet { ${MONEY} }
   totalDiscountsSet { ${MONEY} }

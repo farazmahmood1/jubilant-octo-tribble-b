@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
+import { afterChange } from '../../domain/settle.js';
 import {
   ConsignmentError,
   TEMPLATE_CSV,
@@ -87,12 +88,13 @@ export const consignmentRouter = (getSql: SqlProvider): Router => {
 
   router.post('/consignment/transfers', async (req, res) => {
     const body = parse(transfer, req.body);
-    const transferId = await createTransfer(requireSql(getSql), {
+    const sql = requireSql(getSql);
+    const transferId = await createTransfer(sql, {
       ...body,
       sentAt: body.sentAt ? new Date(body.sentAt) : new Date(),
       actorId: await actor(req),
     }).catch(asHttp(res));
-    if (transferId) res.status(201).json({ id: transferId });
+    if (transferId) res.status(201).json({ id: transferId, ...(await afterChange(sql, 'consignment transfer')) });
   });
 
   /** Phase one: validate the sheet, write nothing. */

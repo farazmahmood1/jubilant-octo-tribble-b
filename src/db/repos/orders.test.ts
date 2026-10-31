@@ -99,6 +99,19 @@ describe('customers and orders', { skip: skipWithoutDb }, () => {
     assert.deepEqual(second.lines, { inserted: 0, updated: 2, changed: 0, removed: 0 });
   });
 
+  it('stores payment gateways, and keeps them when an input does not say', async () => {
+    const input = order({ shopifyOrderId: 5_000_000_301n, orderNumber: '#1301', paymentGateways: ['Cash on Delivery (COD)'] });
+    const { id } = await upsertOrder(s.schema.sql, input);
+    const gateways = async () => (await s.schema.sql<{ g: string[] | null }[]>`select payment_gateways as g from orders where id = ${id}`)[0]!.g;
+    assert.deepEqual(await gateways(), ['Cash on Delivery (COD)']);
+    await upsertOrder(s.schema.sql, { ...input, paymentGateways: null });
+    const { paymentGateways: _, ...withoutField } = input;
+    await upsertOrder(s.schema.sql, withoutField);
+    assert.deepEqual(await gateways(), ['Cash on Delivery (COD)'], 'null or left out never erases it');
+    await upsertOrder(s.schema.sql, { ...input, paymentGateways: ['shopify_payments'] });
+    assert.deepEqual(await gateways(), ['shopify_payments']);
+  });
+
   it('round-trips every money column exactly as Paisa', async () => {
     const stored = await findOrderByShopifyId(s.schema.sql, s.nur, 5_000_000_001n);
     assert.equal(stored?.total, 275_000n);

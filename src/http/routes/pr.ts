@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 
 import { actorId } from '../../auth/actor.js';
+import { afterChange } from '../../domain/settle.js';
 import { CLASSIFICATIONS, PrError, addPost, classifyPrSend, createPrSend, detectPrSends, listPosts, listPrSends } from '../../domain/pr.js';
 import { type SqlProvider, requireSql, sessionUser } from '../middleware/database.js';
 import { HttpError } from '../middleware/errors.js';
@@ -59,15 +60,17 @@ export const prRouter = (getSql: SqlProvider): Router => {
 
   router.post('/pr/sends', async (req, res) => {
     const body = parse(manual, req.body);
-    const sendId = await createPrSend(requireSql(getSql), { ...body, sentAt: new Date(body.sentAt), actorId: await actor(req) }).catch(asHttp);
-    res.status(201).json({ id: sendId });
+    const sql = requireSql(getSql);
+    const sendId = await createPrSend(sql, { ...body, sentAt: new Date(body.sentAt), actorId: await actor(req) }).catch(asHttp);
+    res.status(201).json({ id: sendId, ...(await afterChange(sql, 'PR send')) });
   });
 
   router.post('/pr/sends/:id/classify', async (req, res) => {
     const { id: sendId } = parse(idParams, req.params);
     const body = parse(classify, req.body);
-    await classifyPrSend(requireSql(getSql), { sendId, ...body, actorId: await actor(req) }).catch(asHttp);
-    res.json({ id: sendId, classification: body.classification });
+    const sql = requireSql(getSql);
+    await classifyPrSend(sql, { sendId, ...body, actorId: await actor(req) }).catch(asHttp);
+    res.json({ id: sendId, classification: body.classification, ...(await afterChange(sql, 'PR classification')) });
   });
 
   router.get('/influencers/:id/posts', async (req, res) => {

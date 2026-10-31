@@ -1,4 +1,5 @@
 import { prDetectJob } from '../domain/pr.js';
+import { stockPushJob } from '../domain/shopify-stock.js';
 import { postexJob } from './postex.js';
 import { payoutsJob } from './postex-payouts.js';
 import { reconciliationJob } from './reconciliation.js';
@@ -23,6 +24,7 @@ export const jobs: JobDefinition[] = [
   },
   ...shopifyJobs,
   catchupJob,
+  stockPushJob,
   postexJob,
   payoutsJob,
   reconciliationJob,

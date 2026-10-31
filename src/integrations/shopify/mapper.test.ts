@@ -91,12 +91,19 @@ describe('mapOrder', () => {
     assert.equal(mapped.order.total, 125_000n);
     assert.equal(mapped.order.shipping, 25_000n);
     assert.equal(mapped.order.financialStatus, 'pending');
+    assert.equal(mapped.order.paymentGateways, null, 'a payload without gateways says nothing about them');
     assert.equal(mapped.order.channel, 'online');
     assert.deepEqual(mapped.order.placedAt, new Date('2026-09-01T10:00:00Z'));
     assert.deepEqual(mapped.customer, { shopifyCustomerId: 77n, name: 'Test Customer', phone: '0300 1234567' });
     assert.deepEqual(mapped.lines, [
       { lineKey: 'shopify:5', shopifyVariantId: 21n, sku: 'SKU-21', title: 'Item 5', qty: 2, unitPrice: 50_000n, discount: 0n, total: 100_000n },
     ]);
+  });
+
+  it('keeps the payment gateways Shopify names, trimmed, and an empty list as empty', () => {
+    const gateways = (names: string[]) => mapOrder(order(1002, '2026-09-01T10:00:00Z', { paymentGatewayNames: names })).order.paymentGateways;
+    assert.deepEqual(gateways([' Cash on Delivery (COD) ', 'shopify_payments']), ['Cash on Delivery (COD)', 'shopify_payments']);
+    assert.deepEqual(gateways([]), []);
   });
 
   it('falls back to the customer phone, and to the address name, when the other is missing', () => {

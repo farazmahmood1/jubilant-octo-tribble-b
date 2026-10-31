@@ -5,6 +5,7 @@ import { actorId } from '../../auth/actor.js';
 import { can } from '../../auth/permissions.js';
 import { damagedRegister } from '../../db/repos/damaged.js';
 import { postShipmentAccounting } from '../../domain/accounting.js';
+import { afterChange } from '../../domain/settle.js';
 import { ReturnsActionError, type ShopifyReturnsGateway, cancelShopifyOrderForReturn, syncCheckInToShopify } from '../../domain/shopify-returns.js';
 import { parcelUnits } from '../../db/repos/parcels.js';
 import { openingStockFromShopify, shopifyStockComparison } from '../../domain/opening-stock.js';
@@ -181,7 +182,7 @@ export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {
       ...(body.note ? { note: body.note } : {}),
       ...(body.asAt ? { at: asAtDay(body.asAt) } : {}),
     }).catch(asHttp);
-    res.status(result.adjustmentId ? 201 : 200).json(result);
+    res.status(result.adjustmentId ? 201 : 200).json({ ...result, ...(await afterChange(sql, 'stock count')) });
   });
 
   router.get('/stock/locations', async (_req, res) => {
@@ -314,7 +315,7 @@ export const stockRouter = (getSql: SqlProvider, options: StockRouterOptions = {
       // End of that day in Karachi, so the count is in any check "as at" the same date.
       ...(body.asAt ? { at: asAtDay(body.asAt) } : {}),
     }).catch(asHttp);
-    res.status(201).json({ id });
+    res.status(201).json({ id, ...(await afterChange(sql, 'stock adjustment')) });
   });
 
   return router;

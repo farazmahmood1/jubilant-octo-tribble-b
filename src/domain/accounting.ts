@@ -570,6 +570,8 @@ export interface ShipmentPostingResult {
  */
 export const postShipmentAccounting = async (sql: Sql, shipmentId: string): Promise<ShipmentPostingResult> =>
   atomically(sql, async (tx) => {
+    // One pass per parcel at a time: the sync and a webhook or a request can reach the same parcel.
+    await tx`select id from shipments where id = ${shipmentId} for update`;
     const [p] = await tx<
       {
         tracking_number: string; postex_account_id: string; account_store: string | null; order_id: string | null; order_store: string | null;

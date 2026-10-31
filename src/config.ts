@@ -54,10 +54,11 @@ const schema = z.object({
   AUTH_SESSION_HOURS: z.coerce.number().int().positive().default(12),
   // The one write to Shopify the plan allows: the confirmation tag, set when the desk records a call.
   // Off unless this is true, and it needs the write_orders scope on the Shopify app.
+  // On unless set to false: the app has write_orders, and the desk's decision belongs on the order.
   SHOPIFY_WRITE_CONFIRMATION_TAGS: z
     .string()
     .optional()
-    .transform((v) => v?.toLowerCase() === 'true'),
+    .transform((v) => v?.toLowerCase() !== 'false'),
   POSTEX_ALLOW_WRITES: z
     .string()
     .optional()

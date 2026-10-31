@@ -140,7 +140,7 @@ describe('Shopify refunds and returns, reconciled', { skip: skipWithoutDb }, () 
     // Scenario B: a check-in whose order Shopify no longer has is kept, and named.
     await checkInReturn(s.schema.sql, back, 'restocked', actor);
     const [c] = await s.schema.sql<{ id: string }[]>`select id from return_check_ins where shipment_id = ${back}`;
-    const gone = { order: async () => null, cancel: async () => {}, adjust: async () => {} };
+    const gone = { order: async () => null, cancel: async () => {}, adjust: async () => {}, createReturn: async () => {}, dispose: async () => {}, closeReturn: async () => {} };
     await syncCheckInToShopify(s.schema.sql, { checkInId: c!.id, actorId: actor, gateway: gone });
     const after = await returnsReconciliation(s.schema.sql, {}, NOW);
     assert.deepEqual(after.rows.find((r) => r.shipmentId === back)?.issues.map((i) => i.kind), ['shopify_order_missing']);
